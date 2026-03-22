@@ -1,6 +1,5 @@
 import asyncio
 from abc import ABC, abstractmethod
-from concurrent.futures import ThreadPoolExecutor
 
 from mailbridge.dto.bulk_email_dto import BulkEmailDTO
 from mailbridge.dto.bulk_email_response_dto import BulkEmailResponseDTO
@@ -51,8 +50,7 @@ class BaseEmailProvider(ABC):
         Providers with native async HTTP clients should override this method.
         """
         loop = asyncio.get_event_loop()
-        with ThreadPoolExecutor() as pool:
-            return await loop.run_in_executor(pool, self.send, message)
+        return await loop.run_in_executor(None, self.send, message)
 
     async def async_send_bulk(self, bulk: BulkEmailDTO) -> BulkEmailResponseDTO:
         """Send multiple emails asynchronously.
@@ -61,8 +59,7 @@ class BaseEmailProvider(ABC):
         Providers with native async HTTP clients should override this method.
         """
         loop = asyncio.get_event_loop()
-        with ThreadPoolExecutor() as pool:
-            return await loop.run_in_executor(pool, self.send_bulk, bulk)
+        return await loop.run_in_executor(None, self.send_bulk, bulk)
 
     def supports_templates(self) -> bool:
         return False
@@ -98,6 +95,7 @@ class BaseEmailProvider(ABC):
 class TemplateCapableProvider(BaseEmailProvider, ABC):
     def supports_templates(self) -> bool:
         return True
+
 
 class BulkCapableProvider(BaseEmailProvider):
     def supports_bulk_sending(self) -> bool:
