@@ -5,3 +5,4 @@ requests-mock
 boto3
 coverage
 python-dotenv
+pytest-asyncio
