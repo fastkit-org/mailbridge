@@ -7,7 +7,6 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.base import MIMEBase
 from email import encoders
 from pathlib import Path
-from typing import Dict, Any
 from mailbridge.providers.base_email_provider import BaseEmailProvider
 from mailbridge.dto.email_response_dto import EmailResponseDTO
 from mailbridge.dto.bulk_email_dto import BulkEmailDTO
@@ -26,9 +25,7 @@ class SMTPProvider(BaseEmailProvider):
 
     def _validate_config(self) -> None:
         required = ['host', 'port', 'username', 'password']
-
         missing = [key for key in required if key not in self.config]
-
         if missing:
             raise ConfigurationError(
                 f"Missing required SMTP configuration: {', '.join(missing)}"
@@ -107,6 +104,9 @@ class SMTPProvider(BaseEmailProvider):
                         ))
 
         except Exception as e:
+            # Connection-level failure: cannot recover, surface as EmailSendError.
+            # Any messages already processed are discarded — partial results would
+            # be misleading since we cannot know which ones actually went through.
             raise EmailSendError(
                 f"Failed to send bulk emails via SMTP: {str(e)}",
                 provider='smtp',
@@ -128,15 +128,11 @@ class SMTPProvider(BaseEmailProvider):
             msg['Bcc'] = ', '.join(message.bcc)
         if message.reply_to:
             msg['Reply-To'] = message.reply_to
-
         if message.headers:
             for key, value in message.headers.items():
                 msg[key] = value
 
-        if message.html:
-            part = MIMEText(message.body, 'html')
-        else:
-            part = MIMEText(message.body, 'plain')
+        part = MIMEText(message.body, 'html' if message.html else 'plain')
         msg.attach(part)
 
         if message.attachments:
@@ -151,17 +147,9 @@ class SMTPProvider(BaseEmailProvider):
 
         if use_ssl:
             context = ssl.create_default_context()
-            server = smtplib.SMTP_SSL(
-                self.config['host'],
-                self.config['port'],
-                context=context
-            )
+            server = smtplib.SMTP_SSL(self.config['host'], self.config['port'], context=context)
         else:
-            server = smtplib.SMTP(
-                self.config['host'],
-                self.config['port']
-            )
-
+            server = smtplib.SMTP(self.config['host'], self.config['port'])
             if use_tls:
                 context = ssl.create_default_context()
                 server.starttls(context=context)
@@ -170,7 +158,7 @@ class SMTPProvider(BaseEmailProvider):
         return server
 
     def _get_async_smtp_connection(self):
-        """Build an aiosmtplib SMTP context manager."""
+        """Return an aiosmtplib SMTP async context manager."""
         use_tls = self.config.get('use_tls', True)
         use_ssl = self.config.get('use_ssl', False)
 
@@ -188,7 +176,6 @@ class SMTPProvider(BaseEmailProvider):
             with open(attachment, 'rb') as f:
                 part = MIMEBase('application', 'octet-stream')
                 part.set_payload(f.read())
-
             encoders.encode_base64(part)
             part.add_header(
                 'Content-Disposition',
