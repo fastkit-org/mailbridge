@@ -623,7 +623,7 @@ class TestMailBridgeCustomProvider:
         with pytest.raises(TypeError) as exc_info:
             MailBridge.register_provider('invalid', InvalidProvider)
 
-        assert 'must inherit from EmailProvider' in str(exc_info.value)
+        assert 'must inherit from BaseEmailProvider' in str(exc_info.value)
 
     def test_available_providers_includes_custom(self):
         """Test available_providers includes custom providers."""
