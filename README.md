@@ -1,63 +1,72 @@
 # MailBridge 📧
 
-# MailBridge  
-[![CI](https://github.com/codevelo-pub/mailbridge/actions/workflows/tests.yml/badge.svg)](https://github.com/codevelo-pub/mailbridge/actions/workflows/tests.yml)
+[![CI](https://github.com/fastkit-org/mailbridge/actions/workflows/tests.yml/badge.svg)](https://github.com/fastkit-org/mailbridge/actions/workflows/tests.yml)
 [![PyPI version](https://img.shields.io/pypi/v/mailbridge.svg)](https://pypi.org/project/mailbridge/)
-[![codecov](https://codecov.io/gh/radomirbrkovic/mailbridge/branch/main/graph/badge.svg)](https://codecov.io/gh/radomirbrkovic/mailbridge)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 **Unified Python email library with multi-provider support**
 
-**MailBridge** is a flexible Python library for sending emails, allowing you to use multiple providers through a single, simple interface.
-It supports **SMTP**, **SendGrid**, **Mailgun**, **Amazon SES**, **Postmark**, and **Brevo**.
+**MailBridge** is a flexible Python library for sending emails, allowing you to use multiple providers through a single, simple interface. It supports **SMTP**, **SendGrid**, **Mailgun**, **Amazon SES**, **Postmark**, and **Brevo** — with both synchronous and asynchronous APIs.
 
 ---
 
 ## ✨ Features
 
-- 🎨 **Template Support** - Use dynamic templates with all major providers
-- 📎 **Attachment Support** - Add file attachment in email message
-- 📦 **Bulk Sending** - Send thousands of emails efficiently with native API optimization
-- 🔧 **Unified Interface** - Same code works with any provider
-- ✅ **Fully Tested** - 156 unit tests, 96% coverage
-- 🚀 **Production Ready** - Battle-tested and reliable
-- 📚 **Great Documentation** - Extensive examples and guides
+- 🎨 **Template Support** — Use dynamic templates with all major providers
+- 📎 **Attachment Support** — Add file attachments to any email
+- 📦 **Bulk Sending** — Send thousands of emails efficiently with native API optimizations
+- ⚡ **Async Support** — First-class `async/await` API via `AsyncMailBridge`
+- 🔧 **Unified Interface** — Same code works with any provider
+- ✅ **Fully Tested** — 220+ unit tests, 92% coverage
+- 🚀 **Production Ready** — Battle-tested and reliable
+- 📚 **Great Documentation** — Extensive examples and guides
 
 ---
 
 ## 📦 Installation
 
+MailBridge uses [uv](https://docs.astral.sh/uv/) for dependency management. If you don't have `uv` installed:
+
 ```bash
-pip install mailbridge
+curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-**Optional dependencies:**
+### Installing the package
+
 ```bash
-# For SendGrid
-pip install mailbridge[sendgrid]
+# Core install (SMTP, SendGrid, Mailgun, Postmark, Brevo work out of the box)
+uv add mailbridge
 
-# For Amazon SES
-pip install mailbridge[ses]
+# With async support (aiohttp + aiosmtplib)
+uv add "mailbridge[async]"
 
-# For all providers
-pip install mailbridge[all]
+# With Amazon SES support
+uv add "mailbridge[ses]"
 
-# SMTP and Postmark work out of the box
+# Everything
+uv add "mailbridge[all]"
+```
+
+### pip (alternative)
+
+```bash
+pip install mailbridge
+pip install "mailbridge[async]"   # async support
+pip install "mailbridge[ses]"     # Amazon SES
+pip install "mailbridge[all]"     # everything
 ```
 
 ---
 
 ## 🚀 Quick Start
 
-### Basic Email
+### Synchronous
 
 ```python
 from mailbridge import MailBridge
 
-# Initialize with your provider
 mailer = MailBridge(provider='sendgrid', api_key='your-api-key')
 
-# Send email
 response = mailer.send(
     to='recipient@example.com',
     subject='Hello from MailBridge!',
@@ -67,58 +76,131 @@ response = mailer.send(
 print(f"Sent! Message ID: {response.message_id}")
 ```
 
-### Template Email
+### Asynchronous
 
 ```python
-# Send template with dynamic data
-response = mailer.send(
-    to='user@example.com',
-    subject='',  # From template
-    body='',     # From template
-    template_id='welcome-template',
-    template_data={
-        'name': 'John Doe',
-        'company': 'Acme Corp',
-        'activation_link': 'https://...'
-    }
-)
+import asyncio
+from mailbridge import AsyncMailBridge
+
+async def main():
+    async with AsyncMailBridge(provider='sendgrid', api_key='your-api-key') as mailer:
+        response = await mailer.send(
+            to='recipient@example.com',
+            subject='Hello from MailBridge!',
+            body='<h1>It works!</h1><p>Email sent successfully.</p>'
+        )
+        print(f"Sent! Message ID: {response.message_id}")
+
+asyncio.run(main())
 ```
 
-### Bulk Sending
+---
+
+## ⚡ AsyncMailBridge
+
+`AsyncMailBridge` mirrors the `MailBridge` API exactly — every method that exists on the sync client has an `await`-able counterpart on the async client. Both clients share the same provider registry, so `register_provider` works for both.
+
+### When to use the async client
+
+Use `AsyncMailBridge` whenever your application already runs an event loop — FastAPI, Starlette, Sanic, or any other async framework. Firing email sends with `await` means the event loop is never blocked, and bulk sends run all requests concurrently.
+
+### Single email
 
 ```python
-from mailbridge import MailBridge, EmailMessageDto
+import asyncio
+from mailbridge import AsyncMailBridge
 
-messages = [
-    EmailMessageDto(
-        to='user1@example.com',
-        subject='Welcome',
-        body='<p>Welcome User 1!</p>'
-    ),
-    EmailMessageDto(
-        to='user2@example.com',
-        subject='Welcome',
-        body='<p>Welcome User 2!</p>'
-    ),
-    # ... more messages
-]
+async def send_welcome(user_email: str, user_name: str):
+    async with AsyncMailBridge(provider='sendgrid', api_key='SG.xxxxx') as mailer:
+        return await mailer.send(
+            to=user_email,
+            subject='Welcome!',
+            template_id='d-welcome-template',
+            template_data={'name': user_name}
+        )
 
-result = mailer.send_bulk(messages)
-print(f"Sent: {result.successful}/{result.total}")
+asyncio.run(send_welcome('user@example.com', 'Alice'))
 ```
+
+### Bulk sending
+
+```python
+import asyncio
+from mailbridge import AsyncMailBridge, EmailMessageDto
+
+async def send_newsletter(subscribers: list[dict]):
+    messages = [
+        EmailMessageDto(
+            to=sub['email'],
+            template_id='newsletter-template',
+            template_data={'name': sub['name']}
+        )
+        for sub in subscribers
+    ]
+
+    async with AsyncMailBridge(provider='sendgrid', api_key='SG.xxxxx') as mailer:
+        result = await mailer.send_bulk(messages)
+
+    print(f"Sent: {result.successful}/{result.total}, Failed: {result.failed}")
+
+asyncio.run(send_newsletter([...]))
+```
+
+Bulk sends fire all requests **concurrently** via `asyncio.gather` — for HTTP providers (SendGrid, Mailgun, Brevo, Postmark) this means one `aiohttp.ClientSession` is shared across all concurrent requests. SMTP bulk sends reuse a single async SMTP connection for the entire batch.
+
+### FastAPI integration
+
+```python
+from contextlib import asynccontextmanager
+from fastapi import FastAPI
+from mailbridge import AsyncMailBridge
+
+mailer: AsyncMailBridge | None = None
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global mailer
+    mailer = AsyncMailBridge(provider='sendgrid', api_key='SG.xxxxx')
+    yield
+    await mailer.close()
+
+app = FastAPI(lifespan=lifespan)
+
+@app.post("/register")
+async def register(email: str, name: str):
+    await mailer.send(
+        to=email,
+        subject='Welcome!',
+        template_id='d-welcome-template',
+        template_data={'name': name}
+    )
+    return {"status": "ok"}
+```
+
+### Async vs sync — which to choose?
+
+| | `MailBridge` | `AsyncMailBridge` |
+|---|---|---|
+| API style | Synchronous | `async/await` |
+| Best for | Scripts, Django, Flask | FastAPI, Starlette, asyncio apps |
+| Bulk concurrency | Sequential | Concurrent (`asyncio.gather`) |
+| SES (boto3) | Direct call | Thread pool (boto3 has no async SDK) |
+| Requires `[async]` extra | No | Yes (for native I/O) |
+
+> **Note:** `AsyncMailBridge` works without the `[async]` extra — it falls back to a thread pool executor for all providers. Install `mailbridge[async]` to get native non-blocking I/O via `aiohttp` and `aiosmtplib`.
 
 ---
 
 ## 🎯 Supported Providers
 
-| Provider | Templates | Bulk API | Features |
-|----------|-----------|----------|----------|
-| **SendGrid** | ✅ | ✅ Native | Personalizations, tracking |
-| **Amazon SES** | ✅ | ✅ Native | 50/call batching, config sets |
-| **Postmark** | ✅ | ✅ Native | Open/click tracking, streams |
-| **Mailgun** | ✅ | ✅ Native | Templates, tracking |
-| **Brevo** | ✅ | ✅ Native | Templates, SMS support |
-| **SMTP** | ❌ | ❌ | Universal compatibility |
+| Provider | Templates | Bulk API | Async I/O |
+|----------|-----------|----------|-----------|
+| **SendGrid** | ✅ | ✅ Native | ✅ `aiohttp` |
+| **Amazon SES** | ✅ | ✅ Native | ✅ Thread pool |
+| **Postmark** | ✅ | ✅ Native | ✅ `aiohttp` |
+| **Mailgun** | ✅ | ✅ Native | ✅ `aiohttp` |
+| **Brevo** | ✅ | ✅ Native | ✅ `aiohttp` |
+| **SMTP** | ❌ | ❌ | ✅ `aiosmtplib` |
 
 ---
 
@@ -138,7 +220,6 @@ mailer = MailBridge(
 
 - [Get API Key](https://app.sendgrid.com/settings/api_keys)
 - [Documentation](https://docs.sendgrid.com/)
-- [Examples](https://github.com/codevelo-pub/mailbridge/blob/main/examples/sengrid_basic.py)
 
 ---
 
@@ -153,7 +234,7 @@ mailer = MailBridge(
     from_email='verified@yourdomain.com'
 )
 
-# Or using IAM role (EC2/Lambda)
+# Or using IAM role (EC2/Lambda) — no credentials needed
 mailer = MailBridge(
     provider='ses',
     region_name='us-east-1',
@@ -163,9 +244,8 @@ mailer = MailBridge(
 
 - [SES Console](https://console.aws.amazon.com/ses/)
 - [Documentation](https://docs.aws.amazon.com/ses/)
-- [Examples](https://github.com/codevelo-pub/mailbridge/blob/main/examples/ses_basic.py)
 
-**Note:** Email addresses must be verified in sandbox mode. Request production access to send to any email.
+**Note:** Email addresses must be verified in sandbox mode. Request production access to send to any address.
 
 ---
 
@@ -175,14 +255,7 @@ mailer = MailBridge(
 mailer = MailBridge(
     provider='postmark',
     server_token='xxxxx-xxxxx',
-    from_email='verified@yourdomain.com'
-)
-
-# With tracking
-response = mailer.send(
-    to='user@example.com',
-    subject='Tracked Email',
-    body='<p>Click <a href="https://...">here</a></p>',
+    from_email='verified@yourdomain.com',
     track_opens=True,
     track_links='HtmlAndText'
 )
@@ -190,7 +263,6 @@ response = mailer.send(
 
 - [Get Token](https://account.postmarkapp.com/servers)
 - [Documentation](https://postmarkapp.com/developer)
-- [Examples](https://github.com/codevelo-pub/mailbridge/blob/main/examples/postmark_basic.py)
 
 ---
 
@@ -200,7 +272,7 @@ response = mailer.send(
 mailer = MailBridge(
     provider='mailgun',
     api_key='key-xxxxx',
-    domain='mg.yourdomain.com',  # Required
+    endpoint='https://api.mailgun.net/v3/mg.yourdomain.com',
     from_email='noreply@yourdomain.com'
 )
 ```
@@ -208,11 +280,9 @@ mailer = MailBridge(
 - [Get API Key](https://app.mailgun.com/settings/api_security)
 - [Documentation](https://documentation.mailgun.com/)
 
-**Note:** Uses same API as SendGrid. See [SendGrid examples](https://github.com/codevelo-pub/mailbridge/blob/main/examples/sendgrid_basic.py) for usage patterns.
-
 ---
 
-### Brevo (Sendinblue)
+### Brevo
 
 ```python
 mailer = MailBridge(
@@ -221,22 +291,20 @@ mailer = MailBridge(
     from_email='noreply@yourdomain.com'
 )
 
-# Template ID is a number
+# Template IDs are integers for Brevo
 mailer.send(
     to='user@example.com',
-    template_id=123,  # Not a string
-    template_data={'name': 'John'}
+    template_id=123,
+    template_data={'name': 'Alice'}
 )
 ```
 
 - [Get API Key](https://app.brevo.com/settings/keys/api)
 - [Documentation](https://developers.brevo.com/)
 
-**Note:** Similar to SendGrid/Postmark. Template IDs are integers. See [SendGrid examples](https://github.com/codevelo-pub/mailbridge/blob/main/examples/sendgrid_basic.py) for usage patterns.
-
 ---
 
-### SMTP (Gmail, Outlook, Custom)
+### SMTP
 
 ```python
 # Gmail
@@ -245,9 +313,8 @@ mailer = MailBridge(
     host='smtp.gmail.com',
     port=587,
     username='you@gmail.com',
-    password='app-password',  # Not your regular password!
-    use_tls=True,
-    from_email='you@gmail.com'
+    password='app-password',  # Use App Password, not your regular password
+    use_tls=True
 )
 
 # Outlook
@@ -257,25 +324,21 @@ mailer = MailBridge(
     port=587,
     username='you@outlook.com',
     password='your-password',
-    use_tls=True,
-    from_email='you@outlook.com'
+    use_tls=True
 )
 
-# Custom server
+# Custom server with SSL
 mailer = MailBridge(
     provider='smtp',
     host='mail.yourdomain.com',
     port=465,
     username='user',
     password='pass',
-    use_ssl=True,  # For port 465
-    from_email='noreply@yourdomain.com'
+    use_ssl=True
 )
 ```
 
-- [Examples](https://github.com/codevelo-pub/mailbridge/blob/main/examples/smtp_basic.py)
-
-**Gmail:** Use [App Password](https://support.google.com/accounts/answer/185833) (requires 2FA)
+**Gmail:** Use an [App Password](https://support.google.com/accounts/answer/185833) (requires 2FA enabled).
 
 ---
 
@@ -307,27 +370,31 @@ mailer.send(
 )
 ```
 
-### Newsletters (Bulk)
+### Newsletters (Bulk, async)
 
 ```python
-from mailbridge import EmailMessageDto
+import asyncio
+from mailbridge import AsyncMailBridge, EmailMessageDto
 
-subscribers = User.objects.filter(subscribed=True)
+async def send_newsletter(subscribers):
+    messages = [
+        EmailMessageDto(
+            to=sub.email,
+            template_id='newsletter',
+            template_data={
+                'name': sub.name,
+                'unsubscribe_link': generate_unsubscribe_link(sub)
+            }
+        )
+        for sub in subscribers
+    ]
 
-messages = [
-    EmailMessageDto(
-        to=sub.email,
-        template_id='newsletter',
-        template_data={
-            'name': sub.name,
-            'unsubscribe_link': generate_unsubscribe_link(sub)
-        }
-    )
-    for sub in subscribers
-]
+    async with AsyncMailBridge(provider='sendgrid', api_key='SG.xxxxx') as mailer:
+        result = await mailer.send_bulk(messages)
 
-result = mailer.send_bulk(messages)
-print(f"Sent: {result.successful}/{result.total}")
+    print(f"Sent: {result.successful}/{result.total}")
+
+asyncio.run(send_newsletter(subscribers))
 ```
 
 ### Transactional Notifications
@@ -357,10 +424,10 @@ from pathlib import Path
 mailer.send(
     to='customer@example.com',
     subject='Your Invoice',
-    body='<p>Invoice attached.</p>',
+    body='<p>Please find your invoice attached.</p>',
     attachments=[
         Path('invoice.pdf'),
-        Path('receipt.pdf')
+        ('report.csv', csv_bytes, 'text/csv'),  # (filename, bytes, mimetype)
     ]
 )
 ```
@@ -389,119 +456,115 @@ mailer.send(
 )
 ```
 
-### Context Manager
+### Context Managers
 
 ```python
-with MailBridge(provider='smtp', host='...', port=587) as mailer:
+# Sync
+with MailBridge(provider='smtp', host='...', port=587, ...) as mailer:
     mailer.send(to='user@example.com', subject='Test', body='...')
 # Connection automatically closed
+
+# Async
+async with AsyncMailBridge(provider='sendgrid', api_key='...') as mailer:
+    await mailer.send(to='user@example.com', subject='Test', body='...')
+# Async connection automatically closed
+```
+
+### Custom Providers
+
+```python
+from mailbridge import MailBridge
+from mailbridge.providers.base_email_provider import BaseEmailProvider
+from mailbridge.dto.email_message_dto import EmailMessageDto
+from mailbridge.dto.email_response_dto import EmailResponseDTO
+
+class MyProvider(BaseEmailProvider):
+    def _validate_config(self):
+        if 'api_key' not in self.config:
+            raise ConfigurationError("Missing api_key")
+
+    def send(self, message: EmailMessageDto) -> EmailResponseDTO:
+        # Your implementation
+        return EmailResponseDTO(success=True, provider='myprovider')
+
+# Register once — available to both MailBridge and AsyncMailBridge
+MailBridge.register_provider('myprovider', MyProvider)
+
+mailer = MailBridge(provider='myprovider', api_key='...')
+```
+
+---
+
+## 🧪 Development Setup
+
+MailBridge uses [uv](https://docs.astral.sh/uv/) for dependency management.
+
+```bash
+# Install uv
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Clone and set up
+git clone https://github.com/fastkit-org/mailbridge
+cd mailbridge
+
+# Create venv and install all dev dependencies
+uv sync --extra dev
+
+# Run tests
+uv run pytest
+
+# Run tests with coverage report
+uv run pytest --cov=mailbridge --cov-report=html
+
+# Linting and formatting
+uv run black mailbridge tests
+uv run isort mailbridge tests
+uv run flake8 mailbridge
+uv run mypy mailbridge
+```
+
+### Running specific test suites
+
+```bash
+# All tests
+uv run pytest
+
+# Sync provider tests only
+uv run pytest tests/test_sendgrid_provider.py tests/test_mailgun_provider.py -v
+
+# Async tests only
+uv run pytest tests/test_sendgrid_async.py tests/test_mailgun_async.py \
+               tests/test_brevo_async.py tests/test_postmark_async.py \
+               tests/test_smtp_async.py tests/test_ses_async.py \
+               tests/test_async_mailbridge_client.py -v
+
+# Single file
+uv run pytest tests/test_sendgrid_async.py -v
 ```
 
 ---
 
 ## 📊 Bulk Sending Performance
 
-**Provider Optimizations:**
-
-- **SendGrid**: Uses native batch API (up to 1000/call)
-- **SES**: Auto-batches to 50 recipients per call
-- **Postmark**: Uses batch API (up to 500/call)
-- **Mailgun**: Native batch API
-- **Brevo**: Native batch API
-- **SMTP**: Reuses connection for multiple sends
-
-**Example:**
-
-```python
-# Send 1000 emails efficiently
-messages = [
-    EmailMessageDto(
-        to=f'user{i}@example.com',
-        template_id='campaign',
-        template_data={'user_id': i}
-    )
-    for i in range(1000)
-]
-
-result = mailer.send_bulk(messages)
-print(f"Sent {result.successful} in {result.total_time:.2f}s")
-```
-
----
-
-## 📚 Documentation & Examples
-
-- **[Examples Directory](https://github.com/codevelo-pub/mailbridge/blob/main/examples/)** - Complete examples for all providers
-  - [SendGrid Examples](https://github.com/codevelo-pub/mailbridge/blob/main/examples/sendgrid_basic.py) - Basic, template, bulk
-  - [SES Examples](https://github.com/codevelo-pub/mailbridge/blob/main/examples/ses_basic.py) - AWS setup, templates, bulk
-  - [Postmark Examples](https://github.com/codevelo-pub/mailbridge/blob/main/examples/postmark_basic.py) - Tracking features
-  - [SMTP Examples](https://github.com/codevelo-pub/mailbridge/blob/main/examples/smtp_basic.py) - Gmail, Outlook, custom
-- **[Test Suite](https://github.com/codevelo-pub/mailbridge/blob/main/tests/)** - 156 unit tests, 96% coverage
-- **[Changelog](https://github.com/codevelo-pub/mailbridge/blob/main/CHANGELOG.md)** - Version history
-
----
-
-## 🧪 Testing
-
-MailBridge includes a comprehensive test suite:
-
-```bash
-# Clone repo
-git clone https://github.com/codevelo-pub/mailbridge
-cd mailbridge
-
-# Install dev dependencies
-pip install -r requirements-dev.txt
-
-# Run tests
-pytest tests/ -v
-
-# With coverage
-pytest tests/ --cov=mailbridge --cov-report=html
-
-# Results: 156 tests, 96% coverage
-```
-
----
-
-## 🤝 Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
-
-```bash
-# Setup development environment
-git clone https://github.com/codevelo-pub/mailbridge
-cd mailbridge
-pip install -e ".[dev]"
-
-# Run tests
-pytest
-
-```
+| Provider | Sync | Async |
+|----------|------|-------|
+| **SendGrid** | Native batch API | Concurrent via `asyncio.gather` |
+| **SES** | 50-recipient batches | Concurrent thread pool |
+| **Postmark** | Sequential | Concurrent via `asyncio.gather` |
+| **Mailgun** | Sequential | Concurrent via `asyncio.gather` |
+| **Brevo** | Native batch API | Native batch API async |
+| **SMTP** | Single connection reuse | Single async connection reuse |
 
 ---
 
 ## 📄 License
 
-MIT License - see [LICENSE](https://opensource.org/license/MIT) file for details.
-
----
-
-## 🙏 Acknowledgments
-
-Built with ❤️ for developers who need reliable email delivery.
-
-**Credits:**
-- SendGrid Python SDK
-- Boto3 (AWS SDK)
-- Postmark API
-- Python SMTP library
+MIT License — see [LICENSE](https://opensource.org/license/MIT) for details.
 
 ---
 
 ## 📞 Support
 
-- **Issues**: [GitHub Issues](https://github.com/codevelo-pub/mailbridge/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/codevelo-pub/mailbridge/discussions)
-
----
+- **Issues**: [GitHub Issues](https://github.com/fastkit-org/mailbridge/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/fastkit-org/mailbridge/discussions)
+- **Changelog**: [CHANGELOG.md](https://github.com/fastkit-org/mailbridge/blob/main/CHANGELOG.md)
