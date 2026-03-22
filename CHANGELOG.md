@@ -1,5 +1,74 @@
 # Changelog
 
+## [2.1.0] - 2026-03-22
+
+### ✨ Added
+
+#### Async Support
+- **`AsyncMailBridge` client**: New async-first client class in `client.py` that mirrors the `MailBridge` API exactly, replacing `send` / `send_bulk` with coroutines
+  ```python
+  async with AsyncMailBridge(provider='sendgrid', api_key='...') as mailer:
+      await mailer.send(to='user@example.com', subject='Hi', body='Hello!')
+  ```
+- **`async_send` and `async_send_bulk` on all providers**: Every provider now exposes native async methods
+  - **SendGrid, Mailgun, Brevo, Postmark**: Native async I/O via `aiohttp` — a single `ClientSession` is reused across all concurrent requests in a bulk send
+  - **SMTP**: Native async via `aiosmtplib` — `async_send_bulk` reuses a single SMTP connection for the entire batch
+  - **SES**: `boto3` has no async SDK; `async_send` and `async_send_bulk` run boto3 calls concurrently in a thread pool executor to avoid blocking the event loop
+  - **Fallback**: All providers fall back to a thread pool executor automatically if the optional async library (`aiohttp` / `aiosmtplib`) is not installed
+- **Async context manager** on `BaseEmailProvider` and `AsyncMailBridge`: `async with` is now supported on all providers and both client classes
+- **`async_close` on `BaseEmailProvider`**: Mirrors the sync `close` method for proper async teardown
+- **`[async]` optional dependency group** in `pyproject.toml`:
+  ```bash
+  uv sync --extra async   # installs aiohttp + aiosmtplib
+  ```
+- **Async test suites**: 60+ new tests covering all providers
+  - `tests/test_sendgrid_async.py`
+  - `tests/test_mailgun_async.py`
+  - `tests/test_brevo_async.py`
+  - `tests/test_postmark_async.py`
+  - `tests/test_smtp_async.py`
+  - `tests/test_ses_async.py`
+  - `tests/test_async_mailbridge_client.py`
+
+#### Shared Provider Registry
+- `MailBridge.PROVIDERS` and `AsyncMailBridge.PROVIDERS` now point to the same module-level `_PROVIDERS` dict — calling `register_provider` on either client immediately makes the new provider available to both
+
+### 🔄 Changed
+
+#### Build tooling: `pip` + `requirements.txt` → `uv`
+- **Build backend** switched from `setuptools` to `hatchling` — no more manual `[tool.setuptools] packages` list
+- `requirements.txt` and `requirements-dev.txt` are retired; all dependencies are declared in `pyproject.toml` under `[project.optional-dependencies]`
+- Added `.python-version` file (`3.11`) so `uv` selects the correct interpreter automatically
+- `pytest.ini` reduced to an empty `[pytest]` root marker; all pytest configuration lives in `[tool.pytest.ini_options]` in `pyproject.toml`
+- `asyncio_mode = "auto"` added to pytest config — `@pytest.mark.asyncio` decorator is no longer needed on individual async tests
+
+#### Dependency cleanup
+- Removed `pydantic` from core `dependencies` — it was listed but never used
+- Moved `aiohttp` and `aiosmtplib` from `requirements.txt` to the new `[async]` extra
+- `[dev]` extra in `pyproject.toml` is now the single source of truth for the development toolchain, replacing `requirements-dev.txt`; it now correctly includes `pytest-asyncio`, `aiohttp`, `aiosmtplib`, and `requests-mock` which were previously missing
+
+#### Provider improvements (sync)
+- `send_bulk` on **Mailgun** and **Postmark** now records per-message failures as `failed` responses in `BulkEmailResponseDTO` instead of raising — consistent with the behavior of all other providers
+- `send_bulk` on **SendGrid** and **SES** no longer swallows `EmailSendError` inside the catch-all `except Exception` block
+- **Brevo** `send_bulk` and `async_send_bulk` now handle the case where the API returns a single `messageId` string instead of a list
+- **Brevo** batch payload logic extracted to `_build_bulk_payload` helper — removes duplication between sync and async paths
+- **Mailgun** form-data construction extracted to `_build_aiohttp_form_data` and `_build_form_data` helpers — removes duplication between `async_send` and `_async_send_single`
+- **SendGrid** `_build_payload` no longer sets `template_id = message.template_id or {}` (the `or {}` fallback was semantically wrong for a string field)
+- Error message in `_send_request` / `_async_send_single` unified to `"SendGrid API error"` across all code paths (was inconsistently `"SendGrid template error"` for non-template sends)
+- `BaseEmailProvider` default `async_send` / `async_send_bulk` now use `run_in_executor(None, ...)` (the default thread pool) instead of creating a new `ThreadPoolExecutor` per call, which previously caused executor leaks
+
+### 🧪 Testing
+- Total test count increased from 156 to **220+**
+- All async tests use `pytest-asyncio` with `asyncio_mode = "auto"`
+- Fixed `test_async_send_bulk_partial_failure` in `test_sendgrid_async.py` — `post_side_effect` must be a sync function when used as a `MagicMock` side effect; an `async def` side effect returns a coroutine object instead of the mock response, breaking `__aenter__`
+
+### ⚡ Performance
+- Async bulk sends across HTTP providers (SendGrid, Mailgun, Brevo, Postmark) now fire all requests concurrently with `asyncio.gather`, dramatically reducing wall-clock time for large batches
+- SMTP bulk sends reuse a single connection for the entire batch (sync and async)
+- SES bulk sends run individual boto3 calls concurrently in a thread pool
+
+---
+
 ## [2.0.0] - 2025-11-10
 
 ### 🎉 Major Release - Complete Rewrite

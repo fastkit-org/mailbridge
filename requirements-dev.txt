@@ -1,7 +1,0 @@
-pytest
-pytest-cov
-pytest-mock
-requests-mock
-boto3
-coverage
-python-dotenv

@@ -1,3 +1,4 @@
+import asyncio
 import base64
 from pathlib import Path
 from typing import Dict, Any, List
@@ -9,16 +10,19 @@ from mailbridge.dto.bulk_email_dto import BulkEmailDTO
 from mailbridge.dto.bulk_email_response_dto import BulkEmailResponseDTO
 from mailbridge.exceptions import ConfigurationError, EmailSendError
 
+try:
+    import aiohttp
+    AIOHTTP_AVAILABLE = True
+except ImportError:
+    AIOHTTP_AVAILABLE = False
+
+
 class PostmarkProvider(TemplateCapableProvider, BulkCapableProvider):
 
     def send(self, message: EmailMessageDto) -> EmailResponseDTO:
         try:
             payload = self._build_payload(message)
-            headers = {
-                'X-Postmark-Server-Token': self.config['server_token'],
-                'Content-Type': 'application/json',
-                'Accept': 'application/json'
-            }
+            headers = self._build_headers()
 
             response = requests.post(
                 self.endpoint,
@@ -47,7 +51,6 @@ class PostmarkProvider(TemplateCapableProvider, BulkCapableProvider):
                 }
             )
 
-
         except requests.RequestException as e:
             raise EmailSendError(
                 f"Failed to send email via Postmark: {str(e)}",
@@ -59,7 +62,7 @@ class PostmarkProvider(TemplateCapableProvider, BulkCapableProvider):
         try:
             responses = []
 
-            for msg in  bulk.messages:
+            for msg in bulk.messages:
                 response = self.send(msg)
                 responses.append(response)
 
@@ -70,6 +73,117 @@ class PostmarkProvider(TemplateCapableProvider, BulkCapableProvider):
                 f"Failed to send bulk emails via Postmark: {str(e)}",
                 provider='postmark',
                 original_error=e
+            )
+
+    async def async_send(self, message: EmailMessageDto) -> EmailResponseDTO:
+        """Send email via Postmark API asynchronously."""
+        if not AIOHTTP_AVAILABLE:
+            return await super().async_send(message)
+
+        try:
+            payload = self._build_payload(message)
+            headers = self._build_headers()
+
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    self.endpoint,
+                    json=payload,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=30)
+                ) as response:
+                    result = await response.json()
+
+                    if response.status != 200:
+                        raise EmailSendError(
+                            f"Postmark API error: {result.get('ErrorCode')} - "
+                            f"{result.get('Message')}",
+                            provider='postmark'
+                        )
+
+                    return EmailResponseDTO(
+                        success=True,
+                        message_id=result.get('MessageID'),
+                        provider='postmark',
+                        metadata={
+                            'submitted_at': result.get('SubmittedAt'),
+                            'to': result.get('To'),
+                        }
+                    )
+
+        except aiohttp.ClientError as e:
+            raise EmailSendError(
+                f"Failed to send email via Postmark: {str(e)}",
+                provider='postmark',
+                original_error=e
+            )
+
+    async def async_send_bulk(self, bulk: BulkEmailDTO) -> BulkEmailResponseDTO:
+        """Send multiple emails via Postmark asynchronously."""
+        if not AIOHTTP_AVAILABLE:
+            return await super().async_send_bulk(bulk)
+
+        try:
+            headers = self._build_headers()
+
+            async with aiohttp.ClientSession() as session:
+                tasks = [
+                    self._async_send_single(session, headers, msg)
+                    for msg in bulk.messages
+                ]
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            responses = []
+            for result in results:
+                if isinstance(result, Exception):
+                    responses.append(EmailResponseDTO(
+                        success=False,
+                        provider='postmark',
+                        error=str(result)
+                    ))
+                else:
+                    responses.append(result)
+
+            return BulkEmailResponseDTO.from_responses(responses)
+
+        except Exception as e:
+            raise EmailSendError(
+                f"Failed to send bulk emails via Postmark: {str(e)}",
+                provider='postmark',
+                original_error=e
+            )
+
+    async def _async_send_single(
+        self,
+        session: 'aiohttp.ClientSession',
+        headers: Dict[str, str],
+        message: EmailMessageDto
+    ) -> EmailResponseDTO:
+        """Send a single email using an existing aiohttp session."""
+        payload = self._build_payload(message)
+
+        async with session.post(
+            self.endpoint,
+            json=payload,
+            headers=headers,
+            timeout=aiohttp.ClientTimeout(total=30)
+        ) as response:
+            result = await response.json()
+
+            if response.status != 200:
+                raise EmailSendError(
+                    f"Postmark API error: {result.get('ErrorCode')} - "
+                    f"{result.get('Message')}",
+                    provider='postmark'
+                )
+
+            return EmailResponseDTO(
+                success=True,
+                message_id=result.get('MessageID'),
+                provider='postmark',
+                metadata={
+                    'submitted_at': result.get('SubmittedAt'),
+                    'to': result.get('To'),
+                }
             )
 
     def _validate_config(self) -> None:
@@ -83,6 +197,13 @@ class PostmarkProvider(TemplateCapableProvider, BulkCapableProvider):
             'endpoint',
             'https://api.postmarkapp.com/email'
         )
+
+    def _build_headers(self) -> Dict[str, str]:
+        return {
+            'X-Postmark-Server-Token': self.config['server_token'],
+            'Content-Type': 'application/json',
+            'Accept': 'application/json'
+        }
 
     def _build_payload(self, message: EmailMessageDto) -> Dict[str, Any]:
         payload = {

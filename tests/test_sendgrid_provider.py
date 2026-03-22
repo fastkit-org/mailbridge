@@ -301,7 +301,7 @@ class TestSendGridRegularEmail:
 
         with pytest.raises(EmailSendError) as exc_info:
             sendgrid_provider.send(simple_message)
-        assert 'SendGrid template error' in str(exc_info.value)
+        assert 'SendGrid API error' in str(exc_info.value)
         assert '400' in str(exc_info.value)
 
     @patch('mailbridge.providers.sendgrid_provider.requests.post')
@@ -347,7 +347,7 @@ class TestSendGridTemplateEmail:
 
     @patch('mailbridge.providers.sendgrid_provider.requests.post')
     def test_template_with_empty_data(self, mock_post, sendgrid_provider, mock_requests_response):
-        """Test template email with no template data."""
+        """Test template email with no template data — None is normalized to {}."""
         mock_post.return_value = mock_requests_response
 
         message = EmailMessageDto(
@@ -360,8 +360,9 @@ class TestSendGridTemplateEmail:
 
         assert response.success is True
 
+        # template_data=None is normalized to {} so SendGrid never receives null
         payload = mock_post.call_args[1]['json']
-        assert payload['personalizations'][0]['dynamic_template_data'] == None
+        assert payload['personalizations'][0]['dynamic_template_data'] == {}
 
     @patch('mailbridge.providers.sendgrid_provider.requests.post')
     def test_template_is_detected(self, mock_post, sendgrid_provider, template_message):
@@ -599,9 +600,6 @@ class TestSendGridContextManager:
         with SendGridProvider(**sendgrid_config) as provider:
             assert provider is not None
             assert isinstance(provider, SendGridProvider)
-
-        # Provider should be closed after exiting context
-        # (SendGrid doesn't need explicit cleanup, but test the pattern works)
 
 
 # =============================================================================

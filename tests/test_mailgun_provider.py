@@ -250,14 +250,21 @@ class TestMailgunBulk:
         assert result.successful == 3
 
     @patch("mailbridge.providers.mailgun_provider.requests.post")
-    def test_send_bulk_failure(self, mock_post, mailgun_provider):
+    def test_send_bulk_failure_recorded_per_message(self, mock_post, mailgun_provider):
+        """send_bulk records failures per-message instead of raising.
+        An unexpected exception from requests is wrapped and recorded as a
+        failed response, so the caller gets a BulkEmailResponseDTO with
+        failed > 0 rather than an exception propagating out.
+        """
         mock_post.side_effect = Exception("unexpected")
         messages = [
             EmailMessageDto(to="x@example.com", subject="S", body="B")
         ]
         bulk = BulkEmailDTO(messages=messages)
-        with pytest.raises(EmailSendError):
-            mailgun_provider.send_bulk(bulk)
+        result = mailgun_provider.send_bulk(bulk)
+        assert result.total == 1
+        assert result.failed == 1
+        assert result.successful == 0
 
 
 # =============================================================================

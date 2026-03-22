@@ -1,3 +1,4 @@
+import asyncio
 from abc import ABC, abstractmethod
 
 from mailbridge.dto.bulk_email_dto import BulkEmailDTO
@@ -42,6 +43,24 @@ class BaseEmailProvider(ABC):
                 ))
         return BulkEmailResponseDTO.from_responses(responses)
 
+    async def async_send(self, message: EmailMessageDto) -> EmailResponseDTO:
+        """Send an email asynchronously.
+
+        Default implementation runs the synchronous send() in a thread pool.
+        Providers with native async HTTP clients should override this method.
+        """
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self.send, message)
+
+    async def async_send_bulk(self, bulk: BulkEmailDTO) -> BulkEmailResponseDTO:
+        """Send multiple emails asynchronously.
+
+        Default implementation runs the synchronous send_bulk() in a thread pool.
+        Providers with native async HTTP clients should override this method.
+        """
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self.send_bulk, bulk)
+
     def supports_templates(self) -> bool:
         return False
 
@@ -56,13 +75,27 @@ class BaseEmailProvider(ABC):
         """Context manager exit - cleanup connections."""
         self.close()
 
+    async def __aenter__(self):
+        """Async context manager entry."""
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """Async context manager exit - cleanup connections."""
+        await self.async_close()
+
     def close(self) -> None:
         """Close any open connections. Override if needed."""
         pass
 
+    async def async_close(self) -> None:
+        """Close any open async connections. Override if needed."""
+        self.close()
+
+
 class TemplateCapableProvider(BaseEmailProvider, ABC):
     def supports_templates(self) -> bool:
         return True
+
 
 class BulkCapableProvider(BaseEmailProvider):
     def supports_bulk_sending(self) -> bool:
