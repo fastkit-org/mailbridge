@@ -1,37 +1,42 @@
 """
 MailBridge - Unified email library with multi-provider support.
 
-Usage:
+Synchronous usage:
     from mailbridge import MailBridge
 
-    mailer = MailBridge(provider='sendgrid', api_key='xxx')
-    mailer.send(to='user@example.com', subject='Hi', body='Hello!')
+    with MailBridge(provider='sendgrid', api_key='...') as mailer:
+        mailer.send(to='user@example.com', subject='Hi', body='Hello!')
+
+Asynchronous usage:
+    from mailbridge import AsyncMailBridge
+
+    async with AsyncMailBridge(provider='sendgrid', api_key='...') as mailer:
+        await mailer.send(to='user@example.com', subject='Hi', body='Hello!')
 """
 
-# Main client
-from mailbridge.client import MailBridge
+# Main clients
+from mailbridge.client import MailBridge, AsyncMailBridge
 
-# DTOs (optional - for users who need them)
+# DTOs
 from mailbridge.dto.email_message_dto import EmailMessageDto
 from mailbridge.dto.email_response_dto import EmailResponseDTO
 from mailbridge.dto.bulk_email_dto import BulkEmailDTO
 from mailbridge.dto.bulk_email_response_dto import BulkEmailResponseDTO
 
-# Exceptions (optional - for error handling)
+# Exceptions
 from mailbridge.exceptions import (
     MailBridgeError,
     ConfigurationError,
     EmailSendError,
-    ProviderNotFoundError
+    ProviderNotFoundError,
 )
 
-# Version
 __version__ = '2.0.0'
 
-# Public API
 __all__ = [
-    # Main class
+    # Clients
     'MailBridge',
+    'AsyncMailBridge',
 
     # DTOs
     'EmailMessageDto',
