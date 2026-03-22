@@ -1,3 +1,4 @@
+import asyncio
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 from email.mime.multipart import MIMEMultipart
@@ -19,19 +20,15 @@ try:
 except ImportError:
     BOTO3_AVAILABLE = False
 
+
 class SESProvider(TemplateCapableProvider, BulkCapableProvider):
 
     def send(self, message: EmailMessageDto) -> EmailResponseDTO:
         try:
-            # Template email
             if message.is_template_email():
                 return self._send_templated_email(message)
-
-            # Regular email with attachments
             if message.attachments:
                 return self._send_raw_email(message)
-
-            # Simple regular email
             return self._send_simple_email(message)
 
         except ClientError as e:
@@ -56,7 +53,6 @@ class SESProvider(TemplateCapableProvider, BulkCapableProvider):
 
             responses = []
 
-            # Send template messages in bulk (group by template_id)
             if template_messages:
                 grouped_by_template = {}
                 for msg in template_messages:
@@ -65,13 +61,11 @@ class SESProvider(TemplateCapableProvider, BulkCapableProvider):
                     grouped_by_template[msg.template_id].append(msg)
 
                 for template_id, messages in grouped_by_template.items():
-                    # SES bulk limit is 50 destinations
                     for i in range(0, len(messages), 50):
                         batch = messages[i:i + 50]
                         response = self._send_bulk_templated(template_id, batch)
                         responses.append(response)
 
-            # Send regular messages individually (no bulk API for non-template)
             for msg in regular_messages:
                 response = self.send(msg)
                 responses.append(response)
@@ -84,6 +78,43 @@ class SESProvider(TemplateCapableProvider, BulkCapableProvider):
                 provider='ses',
                 original_error=e
             )
+
+    async def async_send(self, message: EmailMessageDto) -> EmailResponseDTO:
+        """Send email via SES asynchronously.
+
+        boto3 does not provide a native async API, so this runs the
+        synchronous send() in a thread pool executor to avoid blocking
+        the event loop.
+        """
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self.send, message)
+
+    async def async_send_bulk(self, bulk: BulkEmailDTO) -> BulkEmailResponseDTO:
+        """Send multiple emails via SES asynchronously.
+
+        Runs individual send() calls concurrently in a thread pool, which
+        provides parallelism despite boto3 lacking a native async API.
+        """
+        loop = asyncio.get_event_loop()
+
+        tasks = [
+            loop.run_in_executor(None, self.send, message)
+            for message in bulk.messages
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        responses = []
+        for result in results:
+            if isinstance(result, Exception):
+                responses.append(EmailResponseDTO(
+                    success=False,
+                    provider='ses',
+                    error=str(result)
+                ))
+            else:
+                responses.append(result)
+
+        return BulkEmailResponseDTO.from_responses(responses)
 
     def _validate_config(self) -> None:
         if not BOTO3_AVAILABLE:
@@ -154,13 +185,11 @@ class SESProvider(TemplateCapableProvider, BulkCapableProvider):
                 }
             }
 
-            # Add template data for personalization
             if msg.template_data:
                 destination['ReplacementTemplateData'] = self._serialize_template_data(
                     msg.template_data
                 )
 
-            # Add CC/BCC if present
             if msg.cc:
                 destination['Destination']['CcAddresses'] = msg.cc
             if msg.bcc:
@@ -168,7 +197,6 @@ class SESProvider(TemplateCapableProvider, BulkCapableProvider):
 
             destinations.append(destination)
 
-        # Default template data (used if no ReplacementTemplateData)
         default_template_data = messages[0].template_data or {}
 
         params = {
@@ -180,7 +208,6 @@ class SESProvider(TemplateCapableProvider, BulkCapableProvider):
 
         response = self.client.send_bulk_templated_email(**params)
 
-        # SES returns status per destination
         success_count = sum(
             1 for status in response.get('Status', [])
             if status.get('Status') == 'Success'
