@@ -19,9 +19,18 @@ except ImportError:
 
 class MailgunProvider(TemplateCapableProvider, BulkCapableProvider):
 
+    def _validate_config(self) -> None:
+        required = ['api_key', 'endpoint']
+        missing = [key for key in required if key not in self.config]
+        if missing:
+            raise ConfigurationError(
+                f"Missing required Mailgun configuration: {', '.join(missing)}"
+            )
+        self.endpoint = self.config['endpoint']
+
     def send(self, message: EmailMessageDto) -> EmailResponseDTO:
         try:
-            data = self._build_from_data(message)
+            data = self._build_form_data(message)
             files = self._build_files(message.attachments) if message.attachments else None
             auth = ('api', self.config['api_key'])
 
@@ -45,9 +54,7 @@ class MailgunProvider(TemplateCapableProvider, BulkCapableProvider):
                 success=True,
                 message_id=result.get('id'),
                 provider='mailgun',
-                metadata={
-                    'message': result.get('message'),
-                }
+                metadata={'message': result.get('message')}
             )
 
         except requests.RequestException as e:
@@ -58,21 +65,25 @@ class MailgunProvider(TemplateCapableProvider, BulkCapableProvider):
             )
 
     def send_bulk(self, bulk: BulkEmailDTO) -> BulkEmailResponseDTO:
-        try:
-            responses = []
+        responses = []
 
-            for msg in bulk.messages:
-                response = self.send(msg)
-                responses.append(response)
+        for msg in bulk.messages:
+            try:
+                responses.append(self.send(msg))
+            except EmailSendError as e:
+                responses.append(EmailResponseDTO(
+                    success=False,
+                    provider='mailgun',
+                    error=str(e)
+                ))
+            except Exception as e:
+                responses.append(EmailResponseDTO(
+                    success=False,
+                    provider='mailgun',
+                    error=f"Unexpected error: {str(e)}"
+                ))
 
-            return BulkEmailResponseDTO.from_responses(responses)
-
-        except Exception as e:
-            raise EmailSendError(
-                f"Failed to send bulk emails via Mailgun: {str(e)}",
-                provider='mailgun',
-                original_error=e
-            )
+        return BulkEmailResponseDTO.from_responses(responses)
 
     async def async_send(self, message: EmailMessageDto) -> EmailResponseDTO:
         """Send email via Mailgun API asynchronously."""
@@ -80,36 +91,7 @@ class MailgunProvider(TemplateCapableProvider, BulkCapableProvider):
             return await super().async_send(message)
 
         try:
-            data = self._build_from_data(message)
-            form_data = aiohttp.FormData()
-            for key, value in data.items():
-                if isinstance(value, list):
-                    for item in value:
-                        form_data.add_field(key, item)
-                else:
-                    form_data.add_field(key, str(value))
-
-            if message.attachments:
-                for attachment in message.attachments:
-                    if isinstance(attachment, Path):
-                        with open(attachment, 'rb') as f:
-                            form_data.add_field(
-                                'attachment',
-                                f.read(),
-                                filename=attachment.name,
-                                content_type='application/octet-stream'
-                            )
-                    elif isinstance(attachment, tuple):
-                        filename, content, mimetype = attachment
-                        if isinstance(content, str):
-                            content = content.encode()
-                        form_data.add_field(
-                            'attachment',
-                            content,
-                            filename=filename,
-                            content_type=mimetype
-                        )
-
+            form_data = self._build_aiohttp_form_data(message)
             auth = aiohttp.BasicAuth('api', self.config['api_key'])
 
             async with aiohttp.ClientSession() as session:
@@ -184,8 +166,35 @@ class MailgunProvider(TemplateCapableProvider, BulkCapableProvider):
         message: EmailMessageDto
     ) -> EmailResponseDTO:
         """Send a single email using an existing aiohttp session."""
-        data = self._build_from_data(message)
+        form_data = self._build_aiohttp_form_data(message)
+
+        async with session.post(
+            f"{self.endpoint}/messages",
+            data=form_data,
+            auth=auth,
+            timeout=aiohttp.ClientTimeout(total=30)
+        ) as response:
+            if response.status != 200:
+                text = await response.text()
+                raise EmailSendError(
+                    f"Mailgun API error: {response.status} - {text}",
+                    provider='mailgun'
+                )
+
+            result = await response.json()
+
+            return EmailResponseDTO(
+                success=True,
+                message_id=result.get('id'),
+                provider='mailgun',
+                metadata={'message': result.get('message')}
+            )
+
+    def _build_aiohttp_form_data(self, message: EmailMessageDto) -> 'aiohttp.FormData':
+        """Build an aiohttp FormData object from a message."""
+        data = self._build_form_data(message)
         form_data = aiohttp.FormData()
+
         for key, value in data.items():
             if isinstance(value, list):
                 for item in value:
@@ -214,40 +223,11 @@ class MailgunProvider(TemplateCapableProvider, BulkCapableProvider):
                         content_type=mimetype
                     )
 
-        async with session.post(
-            f"{self.endpoint}/messages",
-            data=form_data,
-            auth=auth,
-            timeout=aiohttp.ClientTimeout(total=30)
-        ) as response:
-            if response.status != 200:
-                text = await response.text()
-                raise EmailSendError(
-                    f"Mailgun API error: {response.status} - {text}",
-                    provider='mailgun'
-                )
+        return form_data
 
-            result = await response.json()
-
-            return EmailResponseDTO(
-                success=True,
-                message_id=result.get('id'),
-                provider='mailgun',
-                metadata={'message': result.get('message')}
-            )
-
-    def _validate_config(self) -> None:
-        required = ['api_key', 'endpoint']
-        missing = [key for key in required if key not in self.config]
-        if missing:
-            raise ConfigurationError(
-                f"Missing required Mailgun configuration: {', '.join(missing)}"
-            )
-
-        self.endpoint = self.config['endpoint']
-
-    def _build_from_data(self, message: EmailMessageDto) -> Dict[str, Any]:
-        data = {
+    def _build_form_data(self, message: EmailMessageDto) -> Dict[str, Any]:
+        """Build the dict of form fields for a Mailgun request."""
+        data: Dict[str, Any] = {
             'from': message.from_email or self.config.get('from_email'),
             'to': message.to,
             'subject': message.subject,
@@ -267,10 +247,8 @@ class MailgunProvider(TemplateCapableProvider, BulkCapableProvider):
             data['cc'] = message.cc
         if message.bcc:
             data['bcc'] = message.bcc
-
         if message.reply_to:
             data['h:Reply-To'] = message.reply_to
-
         if message.headers:
             for key, value in message.headers.items():
                 data[f'h:{key}'] = value
@@ -278,6 +256,7 @@ class MailgunProvider(TemplateCapableProvider, BulkCapableProvider):
         return data
 
     def _build_files(self, attachments: List) -> List[tuple]:
+        """Build the files list for a requests multipart POST."""
         files = []
 
         for attachment in attachments:
@@ -290,9 +269,6 @@ class MailgunProvider(TemplateCapableProvider, BulkCapableProvider):
                 filename, content, mimetype = attachment
                 if isinstance(content, str):
                     content = content.encode()
-                files.append((
-                    'attachment',
-                    (filename, content, mimetype)
-                ))
+                files.append(('attachment', (filename, content, mimetype)))
 
         return files
