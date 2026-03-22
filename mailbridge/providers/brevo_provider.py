@@ -1,3 +1,4 @@
+import asyncio
 import base64
 from pathlib import Path
 from typing import Dict, Any, List
@@ -8,6 +9,13 @@ from mailbridge.dto.bulk_email_response_dto import BulkEmailResponseDTO
 from mailbridge.dto.email_message_dto import EmailMessageDto
 from mailbridge.dto.email_response_dto import EmailResponseDTO
 from mailbridge.exceptions import ConfigurationError, EmailSendError
+
+try:
+    import aiohttp
+    AIOHTTP_AVAILABLE = True
+except ImportError:
+    AIOHTTP_AVAILABLE = False
+
 
 class BrevoProvider(TemplateCapableProvider, BulkCapableProvider):
     def send(self, message: EmailMessageDto) -> EmailResponseDTO:
@@ -70,7 +78,102 @@ class BrevoProvider(TemplateCapableProvider, BulkCapableProvider):
                 original_error=e
             )
 
+    async def async_send(self, message: EmailMessageDto) -> EmailResponseDTO:
+        """Send email via Brevo API asynchronously."""
+        if not AIOHTTP_AVAILABLE:
+            return await super().async_send(message)
 
+        try:
+            payload = self._build_payload(message)
+            headers = self._build_headers()
+
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    self.endpoint,
+                    json=payload,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=30)
+                ) as response:
+                    if response.status not in (200, 201):
+                        error_data = await response.json()
+                        raise EmailSendError(
+                            f"Brevo API error: {error_data.get('code')} - "
+                            f"{error_data.get('message')}",
+                            provider='brevo'
+                        )
+
+                    result = await response.json()
+
+                    return EmailResponseDTO(
+                        success=True,
+                        message_id=result.get('messageId'),
+                        provider='brevo',
+                        metadata={'status_code': response.status}
+                    )
+
+        except aiohttp.ClientError as e:
+            raise EmailSendError(
+                f"Failed to send email via Brevo: {str(e)}",
+                provider='brevo',
+                original_error=e
+            )
+
+    async def async_send_bulk(self, bulk: BulkEmailDTO) -> BulkEmailResponseDTO:
+        """Send multiple emails via Brevo asynchronously using batch endpoint."""
+        if not AIOHTTP_AVAILABLE:
+            return await super().async_send_bulk(bulk)
+
+        try:
+            payload = {
+                'sender': {
+                    'email': bulk.default_from or self.config.get('from_email')
+                },
+                'subject': bulk.messages[0].subject,
+                'messageVersions': []
+            }
+
+            for message in bulk.messages:
+                message_payload = self._build_payload(message, is_bulk=True)
+                message_payload['to'] = [{'email': email} for email in message.to]
+                payload['messageVersions'].append(message_payload)
+
+            headers = self._build_headers()
+
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    self.endpoint,
+                    json=payload,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=30)
+                ) as response:
+                    if response.status not in (200, 201):
+                        error_data = await response.json()
+                        raise EmailSendError(
+                            f"Brevo API error: {error_data.get('code')} - "
+                            f"{error_data.get('message')}",
+                            provider='brevo'
+                        )
+
+                    result = await response.json()
+
+            email_responses = [
+                EmailResponseDTO(
+                    success=True,
+                    message_id=message_id,
+                    provider='brevo',
+                    metadata={'status_code': response.status}
+                )
+                for message_id in result.get('messageId', [])
+            ]
+
+            return BulkEmailResponseDTO.from_responses(email_responses)
+
+        except aiohttp.ClientError as e:
+            raise EmailSendError(
+                f"Failed to send bulk emails via Brevo: {str(e)}",
+                provider='brevo',
+                original_error=e
+            )
 
     def _validate_config(self) -> None:
         """Validate Brevo configuration."""
@@ -84,17 +187,18 @@ class BrevoProvider(TemplateCapableProvider, BulkCapableProvider):
             'https://api.brevo.com/v3/smtp/email'
         )
 
-    def _send_request(self, payload: Dict[str, Any]):
-        headers = {
+    def _build_headers(self) -> Dict[str, str]:
+        return {
             'api-key': self.config['api_key'],
             'Content-Type': 'application/json',
             'Accept': 'application/json'
         }
 
+    def _send_request(self, payload: Dict[str, Any]):
         response = requests.post(
             self.endpoint,
             json=payload,
-            headers=headers,
+            headers=self._build_headers(),
             timeout=30
         )
 
@@ -107,7 +211,6 @@ class BrevoProvider(TemplateCapableProvider, BulkCapableProvider):
             )
 
         return response
-
 
     def _build_payload(self, message: EmailMessageDto, is_bulk: bool = False) -> Dict[str, Any]:
 
