@@ -1,3 +1,4 @@
+import asyncio
 import json
 from pathlib import Path
 from typing import Dict, Any, List
@@ -9,14 +10,19 @@ from mailbridge.dto.bulk_email_dto import BulkEmailDTO
 from mailbridge.dto.bulk_email_response_dto import BulkEmailResponseDTO
 from mailbridge.exceptions import ConfigurationError, EmailSendError
 
+try:
+    import aiohttp
+    AIOHTTP_AVAILABLE = True
+except ImportError:
+    AIOHTTP_AVAILABLE = False
+
+
 class MailgunProvider(TemplateCapableProvider, BulkCapableProvider):
 
     def send(self, message: EmailMessageDto) -> EmailResponseDTO:
         try:
             data = self._build_from_data(message)
             files = self._build_files(message.attachments) if message.attachments else None
-
-            # Basic auth sa api key
             auth = ('api', self.config['api_key'])
 
             response = requests.post(
@@ -55,7 +61,7 @@ class MailgunProvider(TemplateCapableProvider, BulkCapableProvider):
         try:
             responses = []
 
-            for msg in  bulk.messages:
+            for msg in bulk.messages:
                 response = self.send(msg)
                 responses.append(response)
 
@@ -66,6 +72,168 @@ class MailgunProvider(TemplateCapableProvider, BulkCapableProvider):
                 f"Failed to send bulk emails via Mailgun: {str(e)}",
                 provider='mailgun',
                 original_error=e
+            )
+
+    async def async_send(self, message: EmailMessageDto) -> EmailResponseDTO:
+        """Send email via Mailgun API asynchronously."""
+        if not AIOHTTP_AVAILABLE:
+            return await super().async_send(message)
+
+        try:
+            data = self._build_from_data(message)
+            form_data = aiohttp.FormData()
+            for key, value in data.items():
+                if isinstance(value, list):
+                    for item in value:
+                        form_data.add_field(key, item)
+                else:
+                    form_data.add_field(key, str(value))
+
+            if message.attachments:
+                for attachment in message.attachments:
+                    if isinstance(attachment, Path):
+                        with open(attachment, 'rb') as f:
+                            form_data.add_field(
+                                'attachment',
+                                f.read(),
+                                filename=attachment.name,
+                                content_type='application/octet-stream'
+                            )
+                    elif isinstance(attachment, tuple):
+                        filename, content, mimetype = attachment
+                        if isinstance(content, str):
+                            content = content.encode()
+                        form_data.add_field(
+                            'attachment',
+                            content,
+                            filename=filename,
+                            content_type=mimetype
+                        )
+
+            auth = aiohttp.BasicAuth('api', self.config['api_key'])
+
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{self.endpoint}/messages",
+                    data=form_data,
+                    auth=auth,
+                    timeout=aiohttp.ClientTimeout(total=30)
+                ) as response:
+                    if response.status != 200:
+                        text = await response.text()
+                        raise EmailSendError(
+                            f"Mailgun API error: {response.status} - {text}",
+                            provider='mailgun'
+                        )
+
+                    result = await response.json()
+
+                    return EmailResponseDTO(
+                        success=True,
+                        message_id=result.get('id'),
+                        provider='mailgun',
+                        metadata={'message': result.get('message')}
+                    )
+
+        except aiohttp.ClientError as e:
+            raise EmailSendError(
+                f"Failed to send email via Mailgun: {str(e)}",
+                provider='mailgun',
+                original_error=e
+            )
+
+    async def async_send_bulk(self, bulk: BulkEmailDTO) -> BulkEmailResponseDTO:
+        """Send multiple emails via Mailgun asynchronously."""
+        if not AIOHTTP_AVAILABLE:
+            return await super().async_send_bulk(bulk)
+
+        try:
+            auth = aiohttp.BasicAuth('api', self.config['api_key'])
+
+            async with aiohttp.ClientSession() as session:
+                tasks = [
+                    self._async_send_single(session, auth, msg)
+                    for msg in bulk.messages
+                ]
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            responses = []
+            for result in results:
+                if isinstance(result, Exception):
+                    responses.append(EmailResponseDTO(
+                        success=False,
+                        provider='mailgun',
+                        error=str(result)
+                    ))
+                else:
+                    responses.append(result)
+
+            return BulkEmailResponseDTO.from_responses(responses)
+
+        except Exception as e:
+            raise EmailSendError(
+                f"Failed to send bulk emails via Mailgun: {str(e)}",
+                provider='mailgun',
+                original_error=e
+            )
+
+    async def _async_send_single(
+        self,
+        session: 'aiohttp.ClientSession',
+        auth: 'aiohttp.BasicAuth',
+        message: EmailMessageDto
+    ) -> EmailResponseDTO:
+        """Send a single email using an existing aiohttp session."""
+        data = self._build_from_data(message)
+        form_data = aiohttp.FormData()
+        for key, value in data.items():
+            if isinstance(value, list):
+                for item in value:
+                    form_data.add_field(key, item)
+            else:
+                form_data.add_field(key, str(value))
+
+        if message.attachments:
+            for attachment in message.attachments:
+                if isinstance(attachment, Path):
+                    with open(attachment, 'rb') as f:
+                        form_data.add_field(
+                            'attachment',
+                            f.read(),
+                            filename=attachment.name,
+                            content_type='application/octet-stream'
+                        )
+                elif isinstance(attachment, tuple):
+                    filename, content, mimetype = attachment
+                    if isinstance(content, str):
+                        content = content.encode()
+                    form_data.add_field(
+                        'attachment',
+                        content,
+                        filename=filename,
+                        content_type=mimetype
+                    )
+
+        async with session.post(
+            f"{self.endpoint}/messages",
+            data=form_data,
+            auth=auth,
+            timeout=aiohttp.ClientTimeout(total=30)
+        ) as response:
+            if response.status != 200:
+                text = await response.text()
+                raise EmailSendError(
+                    f"Mailgun API error: {response.status} - {text}",
+                    provider='mailgun'
+                )
+
+            result = await response.json()
+
+            return EmailResponseDTO(
+                success=True,
+                message_id=result.get('id'),
+                provider='mailgun',
+                metadata={'message': result.get('message')}
             )
 
     def _validate_config(self) -> None:
@@ -94,7 +262,6 @@ class MailgunProvider(TemplateCapableProvider, BulkCapableProvider):
                 data['html'] = message.body
             else:
                 data['text'] = message.body
-
 
         if message.cc:
             data['cc'] = message.cc
