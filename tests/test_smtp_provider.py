@@ -766,6 +766,34 @@ class TestSMTPContentDisposition:
 
 
 # =============================================================================
+# _html_to_plain UNIT TESTS
+# =============================================================================
+
+class TestHtmlToPlain:
+    """Unit tests for the _html_to_plain helper."""
+
+    def test_strips_simple_tags(self):
+        assert '<' not in _html_to_plain('<p>Hello</p>')
+        assert 'Hello' in _html_to_plain('<p>Hello</p>')
+
+    def test_strips_nested_tags(self):
+        result = _html_to_plain('<div><p>Hello <b>World</b></p></div>')
+        assert 'Hello' in result
+        assert 'World' in result
+        assert '<' not in result
+
+    def test_collapses_whitespace(self):
+        result = _html_to_plain('<p>Hello</p>   <p>World</p>')
+        assert '   ' not in result
+
+    def test_empty_string(self):
+        assert _html_to_plain('') == ''
+
+    def test_plain_text_unchanged(self):
+        result = _html_to_plain('No tags here')
+        assert result == 'No tags here'
+
+# =============================================================================
 # RUN TESTS
 # =============================================================================
 
