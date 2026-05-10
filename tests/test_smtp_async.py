@@ -281,6 +281,72 @@ class TestSMTPAsyncMessageId:
         ids = [r.message_id for r in result.responses]
         assert len(ids) == len(set(ids)), "All Message-IDs must be unique"
 
+# =============================================================================
+# MIME STRUCTURE ASYNC TESTS
+# =============================================================================
+
+class TestSMTPAsyncMimeStructure:
+    """Verify MIME structure is correct when built via the async send path."""
+
+    async def test_async_send_html_message_outer_is_alternative(self, provider):
+        """async_send: HTML message without attachments uses multipart/alternative."""
+        mock_server = make_mock_smtp_server()
+
+        message = EmailMessageDto(
+            to='r@example.com',
+            subject='Test',
+            body='<p>Hello</p>',
+            html=True,
+        )
+
+        with patch.object(provider, '_get_async_smtp_connection', return_value=mock_server):
+            await provider.async_send(message)
+
+        sent_msg = mock_server.send_message.call_args[0][0]
+        assert sent_msg.get_content_type() == 'multipart/alternative'
+
+    async def test_async_send_with_attachment_outer_is_mixed(self, provider, tmp_path):
+        """async_send: message with attachment uses multipart/mixed."""
+        mock_server = make_mock_smtp_server()
+
+        f = tmp_path / 'doc.txt'
+        f.write_text('data')
+
+        message = EmailMessageDto(
+            to='r@example.com',
+            subject='Test',
+            body='<p>Hello</p>',
+            html=True,
+            attachments=[f],
+        )
+
+        with patch.object(provider, '_get_async_smtp_connection', return_value=mock_server):
+            await provider.async_send(message)
+
+        sent_msg = mock_server.send_message.call_args[0][0]
+        assert sent_msg.get_content_type() == 'multipart/mixed'
+
+    async def test_async_send_with_attachment_body_block_is_alternative(self, provider, tmp_path):
+        """async_send: first part of mixed container is multipart/alternative."""
+        mock_server = make_mock_smtp_server()
+
+        f = tmp_path / 'doc.txt'
+        f.write_text('data')
+
+        message = EmailMessageDto(
+            to='r@example.com',
+            subject='Test',
+            body='<p>Hello</p>',
+            html=True,
+            attachments=[f],
+        )
+
+        with patch.object(provider, '_get_async_smtp_connection', return_value=mock_server):
+            await provider.async_send(message)
+
+        sent_msg = mock_server.send_message.call_args[0][0]
+        assert sent_msg.get_payload()[0].get_content_type() == 'multipart/alternative'
+
 
 if __name__ == '__main__':
     import pytest
