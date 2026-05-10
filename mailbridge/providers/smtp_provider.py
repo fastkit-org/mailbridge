@@ -117,29 +117,39 @@ class SMTPProvider(BaseEmailProvider):
 
     def _build_mime_message(self, message: EmailMessageDto) -> MIMEMultipart:
         """Build a MIME message from an EmailMessageDto."""
-        msg = MIMEMultipart('alternative')
-        msg['Subject'] = message.subject
-        msg['From'] = message.from_email or self.config.get('from_email', self.config['username'])
-        msg['To'] = ', '.join(message.to)
+        has_attachments = bool(message.attachments)
+
+        # Use 'mixed' when attachments are present so email clients
+        # render them correctly. 'alternative' alone cannot carry attachments.
+        outer = MIMEMultipart('mixed' if has_attachments else 'alternative')
+        outer['Subject'] = message.subject
+        outer['From'] = message.from_email or self.config.get('from_email', self.config['username'])
+        outer['To'] = ', '.join(message.to)
 
         if message.cc:
-            msg['Cc'] = ', '.join(message.cc)
+            outer['Cc'] = ', '.join(message.cc)
         if message.bcc:
-            msg['Bcc'] = ', '.join(message.bcc)
+            outer['Bcc'] = ', '.join(message.bcc)
         if message.reply_to:
-            msg['Reply-To'] = message.reply_to
+            outer['Reply-To'] = message.reply_to
         if message.headers:
             for key, value in message.headers.items():
-                msg[key] = value
+                outer[key] = value
 
-        part = MIMEText(message.body, 'html' if message.html else 'plain')
-        msg.attach(part)
+        if has_attachments:
+            # Nest text/html inside a multipart/alternative part so that
+            # the outer multipart/mixed can also carry attachments.
+            body_part = MIMEMultipart('alternative')
+            body_part.attach(MIMEText(message.body, 'html' if message.html else 'plain'))
+            outer.attach(body_part)
+        else:
+            outer.attach(MIMEText(message.body, 'html' if message.html else 'plain'))
 
-        if message.attachments:
+        if has_attachments:
             for attachment in message.attachments:
-                self._attach_file(msg, attachment)
+                self._attach_file(outer, attachment)
 
-        return msg
+        return outer
 
     def _get_smtp_connection(self):
         use_tls = self.config.get('use_tls', True)
