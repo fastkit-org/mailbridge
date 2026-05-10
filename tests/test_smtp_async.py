@@ -5,6 +5,9 @@ Tests cover:
 - async_send using aiosmtplib
 - async_send_bulk reusing a single connection
 - Fallback to thread pool when aiosmtplib is unavailable
+- Message-ID populated in async responses
+- MIME structure correctness via async path
+- Plain-text fallback present via async path
 
 Run with: pytest tests/test_smtp_async.py -v
 """
@@ -62,7 +65,6 @@ def make_mock_smtp_server():
 
 class TestSMTPAsyncSend:
 
-    @pytest.mark.asyncio
     async def test_async_send_success(self, provider, simple_message):
         """async_send returns successful EmailResponseDTO."""
         mock_server = make_mock_smtp_server()
@@ -74,7 +76,6 @@ class TestSMTPAsyncSend:
         assert result.provider == 'smtp'
         mock_server.send_message.assert_called_once()
 
-    @pytest.mark.asyncio
     async def test_async_send_correct_recipients(self, provider):
         """async_send passes correct recipient list to send_message."""
         mock_server = make_mock_smtp_server()
@@ -97,7 +98,6 @@ class TestSMTPAsyncSend:
         assert 'cc@example.com' in recipients
         assert 'bcc@example.com' in recipients
 
-    @pytest.mark.asyncio
     async def test_async_send_error_raises(self, provider, simple_message):
         """async_send raises EmailSendError when server.send_message fails."""
         mock_server = make_mock_smtp_server()
@@ -112,7 +112,6 @@ class TestSMTPAsyncSend:
         assert 'Failed to send email via SMTP' in str(exc_info.value)
         assert exc_info.value.provider == 'smtp'
 
-    @pytest.mark.asyncio
     async def test_async_send_fallback_without_aiosmtplib(self, provider, simple_message):
         """async_send falls back to thread pool when aiosmtplib is unavailable."""
         from mailbridge.dto.email_response_dto import EmailResponseDTO
@@ -134,7 +133,6 @@ class TestSMTPAsyncSend:
 
 class TestSMTPAsyncSendBulk:
 
-    @pytest.mark.asyncio
     async def test_async_send_bulk_reuses_connection(self, provider):
         """async_send_bulk sends all messages over a single SMTP connection."""
         mock_server = make_mock_smtp_server()
@@ -154,7 +152,6 @@ class TestSMTPAsyncSendBulk:
         # send_message should be called once per message over the same connection
         assert mock_server.send_message.call_count == 3
 
-    @pytest.mark.asyncio
     async def test_async_send_bulk_partial_failure(self, provider):
         """async_send_bulk records per-message errors without aborting the whole batch."""
         call_count = 0
@@ -184,7 +181,6 @@ class TestSMTPAsyncSendBulk:
         failed = [r for r in result.responses if not r.success]
         assert 'Recipient rejected' in failed[0].error
 
-    @pytest.mark.asyncio
     async def test_async_send_bulk_connection_error_raises(self, provider):
         """async_send_bulk raises EmailSendError when connection itself fails."""
         mock_server = AsyncMock()
@@ -202,7 +198,6 @@ class TestSMTPAsyncSendBulk:
 
         assert 'Failed to send bulk emails via SMTP' in str(exc_info.value)
 
-    @pytest.mark.asyncio
     async def test_async_send_bulk_fallback_without_aiosmtplib(self, provider):
         """async_send_bulk falls back to thread pool when aiosmtplib is unavailable."""
         from mailbridge.dto.bulk_email_response_dto import BulkEmailResponseDTO
@@ -229,11 +224,199 @@ class TestSMTPAsyncSendBulk:
 
 class TestSMTPAsyncContextManager:
 
-    @pytest.mark.asyncio
     async def test_async_context_manager(self, smtp_config):
         async with SMTPProvider(**smtp_config) as provider:
             assert isinstance(provider, SMTPProvider)
 
+
+# =============================================================================
+# MESSAGE-ID ASYNC TESTS
+# =============================================================================
+
+class TestSMTPAsyncMessageId:
+    """Message-ID must be populated in responses from the async paths."""
+
+    async def test_async_send_response_contains_message_id(self, provider, simple_message):
+        """async_send returns a response with a populated message_id."""
+        mock_server = make_mock_smtp_server()
+
+        with patch.object(provider, '_get_async_smtp_connection', return_value=mock_server):
+            result = await provider.async_send(simple_message)
+
+        assert result.message_id is not None
+        assert result.message_id.startswith('<')
+        assert '@' in result.message_id
+
+    async def test_async_send_bulk_responses_contain_message_ids(self, provider):
+        """async_send_bulk populates message_id on every successful response."""
+        mock_server = make_mock_smtp_server()
+
+        messages = [
+            EmailMessageDto(to=f'u{i}@example.com', subject=f'Test {i}', body='Body')
+            for i in range(3)
+        ]
+        bulk = BulkEmailDTO(messages=messages)
+
+        with patch.object(provider, '_get_async_smtp_connection', return_value=mock_server):
+            result = await provider.async_send_bulk(bulk)
+
+        for response in result.responses:
+            assert response.success is True
+            assert response.message_id is not None
+            assert '@' in response.message_id
+
+    async def test_async_send_bulk_message_ids_are_unique(self, provider):
+        """Each message in a bulk send receives a distinct Message-ID."""
+        mock_server = make_mock_smtp_server()
+
+        messages = [
+            EmailMessageDto(to=f'u{i}@example.com', subject=f'Test {i}', body='Body')
+            for i in range(3)
+        ]
+        bulk = BulkEmailDTO(messages=messages)
+
+        with patch.object(provider, '_get_async_smtp_connection', return_value=mock_server):
+            result = await provider.async_send_bulk(bulk)
+
+        ids = [r.message_id for r in result.responses]
+        assert len(ids) == len(set(ids)), "All Message-IDs must be unique"
+
+# =============================================================================
+# MIME STRUCTURE ASYNC TESTS
+# =============================================================================
+
+class TestSMTPAsyncMimeStructure:
+    """Verify MIME structure is correct when built via the async send path."""
+
+    async def test_async_send_html_message_outer_is_alternative(self, provider):
+        """async_send: HTML message without attachments uses multipart/alternative."""
+        mock_server = make_mock_smtp_server()
+
+        message = EmailMessageDto(
+            to='r@example.com',
+            subject='Test',
+            body='<p>Hello</p>',
+            html=True,
+        )
+
+        with patch.object(provider, '_get_async_smtp_connection', return_value=mock_server):
+            await provider.async_send(message)
+
+        sent_msg = mock_server.send_message.call_args[0][0]
+        assert sent_msg.get_content_type() == 'multipart/alternative'
+
+    async def test_async_send_with_attachment_outer_is_mixed(self, provider, tmp_path):
+        """async_send: message with attachment uses multipart/mixed."""
+        mock_server = make_mock_smtp_server()
+
+        f = tmp_path / 'doc.txt'
+        f.write_text('data')
+
+        message = EmailMessageDto(
+            to='r@example.com',
+            subject='Test',
+            body='<p>Hello</p>',
+            html=True,
+            attachments=[f],
+        )
+
+        with patch.object(provider, '_get_async_smtp_connection', return_value=mock_server):
+            await provider.async_send(message)
+
+        sent_msg = mock_server.send_message.call_args[0][0]
+        assert sent_msg.get_content_type() == 'multipart/mixed'
+
+    async def test_async_send_with_attachment_body_block_is_alternative(self, provider, tmp_path):
+        """async_send: first part of mixed container is multipart/alternative."""
+        mock_server = make_mock_smtp_server()
+
+        f = tmp_path / 'doc.txt'
+        f.write_text('data')
+
+        message = EmailMessageDto(
+            to='r@example.com',
+            subject='Test',
+            body='<p>Hello</p>',
+            html=True,
+            attachments=[f],
+        )
+
+        with patch.object(provider, '_get_async_smtp_connection', return_value=mock_server):
+            await provider.async_send(message)
+
+        sent_msg = mock_server.send_message.call_args[0][0]
+        assert sent_msg.get_payload()[0].get_content_type() == 'multipart/alternative'
+
+# =============================================================================
+# PLAIN-TEXT FALLBACK ASYNC TESTS
+# =============================================================================
+
+class TestSMTPAsyncPlainTextFallback:
+    """Plain-text fallback must be present in messages sent via async path."""
+
+    async def test_async_send_html_has_plain_fallback(self, provider):
+        """async_send: HTML message includes a text/plain part."""
+        mock_server = make_mock_smtp_server()
+
+        message = EmailMessageDto(
+            to='r@example.com',
+            subject='Test',
+            body='<p>Hello <b>World</b></p>',
+            html=True,
+        )
+
+        with patch.object(provider, '_get_async_smtp_connection', return_value=mock_server):
+            await provider.async_send(message)
+
+        sent_msg = mock_server.send_message.call_args[0][0]
+        content_types = [p.get_content_type() for p in sent_msg.get_payload()]
+
+        assert 'text/plain' in content_types
+        assert 'text/html' in content_types
+
+    async def test_async_send_html_last_per_rfc(self, provider):
+        """async_send: HTML part is last inside alternative block (RFC 2046 §5.1.4)."""
+        mock_server = make_mock_smtp_server()
+
+        message = EmailMessageDto(
+            to='r@example.com',
+            subject='Test',
+            body='<p>Hello</p>',
+            html=True,
+        )
+
+        with patch.object(provider, '_get_async_smtp_connection', return_value=mock_server):
+            await provider.async_send(message)
+
+        sent_msg = mock_server.send_message.call_args[0][0]
+        parts = sent_msg.get_payload()
+
+        assert parts[-1].get_content_type() == 'text/html'
+        assert parts[0].get_content_type() == 'text/plain'
+
+    async def test_async_send_bulk_html_has_plain_fallback(self, provider):
+        """async_send_bulk: every HTML message in the batch has a plain-text fallback."""
+        mock_server = make_mock_smtp_server()
+
+        messages = [
+            EmailMessageDto(
+                to=f'u{i}@example.com',
+                subject=f'Test {i}',
+                body=f'<p>Message {i}</p>',
+                html=True,
+            )
+            for i in range(3)
+        ]
+        bulk = BulkEmailDTO(messages=messages)
+
+        with patch.object(provider, '_get_async_smtp_connection', return_value=mock_server):
+            await provider.async_send_bulk(bulk)
+
+        for send_call in mock_server.send_message.call_args_list:
+            sent_msg = send_call[0][0]
+            content_types = [p.get_content_type() for p in sent_msg.get_payload()]
+            assert 'text/plain' in content_types, \
+                f"Missing text/plain fallback in message: {sent_msg['Subject']}"
 
 if __name__ == '__main__':
     import pytest

@@ -9,6 +9,10 @@ Tests cover:
 - Attachments
 - TLS vs SSL connections
 - Error handling
+- Message-ID generation
+- MIME structure correctness
+- Content-Disposition filename encoding
+- Plain-text fallback for HTML messages
 
 Run with: pytest tests/test_smtp_provider.py -v
 """
@@ -18,7 +22,7 @@ from unittest.mock import Mock, patch, MagicMock
 from pathlib import Path
 import smtplib
 
-from mailbridge.providers.smtp_provider import SMTPProvider
+from mailbridge.providers.smtp_provider import SMTPProvider, _html_to_plain
 from mailbridge.dto.email_message_dto import EmailMessageDto
 from mailbridge.dto.email_response_dto import EmailResponseDTO
 from mailbridge.exceptions import ConfigurationError, EmailSendError
@@ -414,6 +418,380 @@ class TestSMTPContextManager:
             assert provider is not None
             assert isinstance(provider, SMTPProvider)
 
+
+# =============================================================================
+# MESSAGE-ID TESTS
+# =============================================================================
+
+class TestSMTPMessageId:
+    """Test that Message-ID is always generated and returned in the response."""
+
+    def test_build_mime_message_sets_message_id(self, smtp_provider, simple_message):
+        """_build_mime_message always sets a non-empty Message-ID header."""
+        msg = smtp_provider._build_mime_message(simple_message)
+
+        assert msg['Message-ID'] is not None
+        assert len(msg['Message-ID']) > 0
+
+    def test_message_id_is_unique_per_message(self, smtp_provider, simple_message):
+        """Each call to _build_mime_message produces a different Message-ID."""
+        msg1 = smtp_provider._build_mime_message(simple_message)
+        msg2 = smtp_provider._build_mime_message(simple_message)
+
+        assert msg1['Message-ID'] != msg2['Message-ID']
+
+    def test_message_id_format(self, smtp_provider, simple_message):
+        """Message-ID follows the RFC 2822 angle-bracket format."""
+        msg = smtp_provider._build_mime_message(simple_message)
+        message_id = msg['Message-ID']
+
+        assert message_id.startswith('<')
+        assert message_id.endswith('>')
+        assert '@' in message_id
+
+    @patch('mailbridge.providers.smtp_provider.smtplib.SMTP')
+    def test_send_response_contains_message_id(self, mock_smtp_class, smtp_provider, simple_message):
+        """send() returns a response whose message_id is populated."""
+        mock_server = MagicMock()
+        mock_smtp_class.return_value.__enter__.return_value = mock_server
+
+        response = smtp_provider.send(simple_message)
+
+        assert response.message_id is not None
+        assert response.message_id.startswith('<')
+        assert '@' in response.message_id
+
+    @patch('mailbridge.providers.smtp_provider.smtplib.SMTP')
+    def test_send_bulk_responses_contain_message_ids(self, mock_smtp_class, smtp_provider):
+        """send_bulk() populates message_id on every successful response."""
+        from mailbridge.dto.bulk_email_dto import BulkEmailDTO
+
+        mock_server = MagicMock()
+        mock_smtp_class.return_value.__enter__.return_value = mock_server
+
+        messages = [
+            EmailMessageDto(to=f'u{i}@example.com', subject=f'Test {i}', body='Body')
+            for i in range(3)
+        ]
+        result = smtp_provider.send_bulk(BulkEmailDTO(messages=messages))
+
+        for response in result.responses:
+            assert response.success is True
+            assert response.message_id is not None
+            assert '@' in response.message_id
+
+# =============================================================================
+# MIME STRUCTURE TESTS
+# =============================================================================
+
+class TestSMTPMimeStructure:
+    """Verify the MIME tree is correct with and without attachments."""
+
+    def test_no_attachments_outer_is_alternative(self, smtp_provider):
+        """Without attachments the outer container is multipart/alternative."""
+        message = EmailMessageDto(
+            to='r@example.com',
+            subject='Test',
+            body='<p>Hello</p>',
+            html=True,
+        )
+        msg = smtp_provider._build_mime_message(message)
+
+        assert msg.get_content_type() == 'multipart/alternative'
+
+    def test_with_attachments_outer_is_mixed(self, smtp_provider, tmp_path):
+        """With attachments the outer container is multipart/mixed."""
+        attachment = tmp_path / 'f.txt'
+        attachment.write_text('data')
+
+        message = EmailMessageDto(
+            to='r@example.com',
+            subject='Test',
+            body='<p>Hello</p>',
+            html=True,
+            attachments=[attachment],
+        )
+        msg = smtp_provider._build_mime_message(message)
+
+        assert msg.get_content_type() == 'multipart/mixed'
+
+    def test_with_attachments_first_part_is_alternative(self, smtp_provider, tmp_path):
+        """With attachments the first child of mixed must be multipart/alternative."""
+        attachment = tmp_path / 'f.txt'
+        attachment.write_text('data')
+
+        message = EmailMessageDto(
+            to='r@example.com',
+            subject='Test',
+            body='<p>Hello</p>',
+            html=True,
+            attachments=[attachment],
+        )
+        msg = smtp_provider._build_mime_message(message)
+        parts = msg.get_payload()
+
+        assert parts[0].get_content_type() == 'multipart/alternative'
+
+    def test_with_attachments_second_part_is_attachment(self, smtp_provider, tmp_path):
+        """With attachments the second child of mixed is the attachment part."""
+        attachment = tmp_path / 'f.txt'
+        attachment.write_text('data')
+
+        message = EmailMessageDto(
+            to='r@example.com',
+            subject='Test',
+            body='<p>Hello</p>',
+            html=True,
+            attachments=[attachment],
+        )
+        msg = smtp_provider._build_mime_message(message)
+        parts = msg.get_payload()
+
+        assert parts[1].get_content_maintype() == 'application'
+        assert parts[1].get_filename() == 'f.txt'
+
+    def test_multiple_attachments_all_present(self, smtp_provider, tmp_path):
+        """All attachments appear as separate parts inside multipart/mixed."""
+        files = []
+        for name in ('a.txt', 'b.txt', 'c.txt'):
+            f = tmp_path / name
+            f.write_text('data')
+            files.append(f)
+
+        message = EmailMessageDto(
+            to='r@example.com',
+            subject='Test',
+            body='Body',
+            attachments=files,
+        )
+        msg = smtp_provider._build_mime_message(message)
+        parts = msg.get_payload()
+
+        # First part is the body block, rest are attachments
+        assert len(parts) == 4
+        filenames = [p.get_filename() for p in parts[1:]]
+        assert set(filenames) == {'a.txt', 'b.txt', 'c.txt'}
+
+# =============================================================================
+# PLAIN-TEXT FALLBACK TESTS
+# =============================================================================
+
+class TestSMTPPlainTextFallback:
+    """Verify that HTML messages always carry a plain-text alternative."""
+
+    def _get_body_alternative_parts(self, msg):
+        """Return the list of parts inside the (possibly nested) alternative block."""
+        if msg.get_content_type() == 'multipart/alternative':
+            return msg.get_payload()
+        # Has attachments — alternative is nested as the first child of mixed
+        return msg.get_payload()[0].get_payload()
+
+    def test_html_message_has_plain_and_html_parts(self, smtp_provider):
+        """HTML message contains both text/plain fallback and text/html part."""
+        message = EmailMessageDto(
+            to='r@example.com',
+            subject='Test',
+            body='<p>Hello <b>World</b></p>',
+            html=True,
+        )
+        msg = smtp_provider._build_mime_message(message)
+        parts = self._get_body_alternative_parts(msg)
+
+        content_types = [p.get_content_type() for p in parts]
+        assert 'text/plain' in content_types
+        assert 'text/html' in content_types
+
+    def test_html_part_is_last(self, smtp_provider):
+        """HTML part comes after plain-text per RFC 2046 §5.1.4 (best last)."""
+        message = EmailMessageDto(
+            to='r@example.com',
+            subject='Test',
+            body='<p>Hello</p>',
+            html=True,
+        )
+        msg = smtp_provider._build_mime_message(message)
+        parts = self._get_body_alternative_parts(msg)
+
+        assert parts[-1].get_content_type() == 'text/html'
+        assert parts[0].get_content_type() == 'text/plain'
+
+    def test_html_body_preserved_in_html_part(self, smtp_provider):
+        """The text/html part carries the original HTML body unchanged."""
+        body = '<p>Hello <b>World</b></p>'
+        message = EmailMessageDto(
+            to='r@example.com',
+            subject='Test',
+            body=body,
+            html=True,
+        )
+        msg = smtp_provider._build_mime_message(message)
+        parts = self._get_body_alternative_parts(msg)
+
+        html_part = next(p for p in parts if p.get_content_type() == 'text/html')
+        assert body in html_part.get_payload(decode=True).decode()
+
+    def test_plain_fallback_strips_html_tags(self, smtp_provider):
+        """The text/plain fallback contains visible text without HTML tags."""
+        message = EmailMessageDto(
+            to='r@example.com',
+            subject='Test',
+            body='<p>Hello <b>World</b></p>',
+            html=True,
+        )
+        msg = smtp_provider._build_mime_message(message)
+        parts = self._get_body_alternative_parts(msg)
+
+        plain_part = next(p for p in parts if p.get_content_type() == 'text/plain')
+        plain_text = plain_part.get_payload(decode=True).decode()
+
+        assert 'Hello' in plain_text
+        assert 'World' in plain_text
+        assert '<' not in plain_text
+        assert '>' not in plain_text
+
+    def test_plain_only_message_has_single_part(self, smtp_provider):
+        """Plain-text message has only a text/plain part — no unnecessary wrapping."""
+        message = EmailMessageDto(
+            to='r@example.com',
+            subject='Test',
+            body='Just plain text',
+            html=False,
+        )
+        msg = smtp_provider._build_mime_message(message)
+        # The outer alternative container itself holds exactly one part
+        parts = msg.get_payload()
+
+        assert len(parts) == 1
+        assert parts[0].get_content_type() == 'text/plain'
+
+    def test_html_message_with_attachment_has_plain_fallback(self, smtp_provider, tmp_path):
+        """Plain-text fallback is present even when the message also has attachments."""
+        attachment = tmp_path / 'doc.txt'
+        attachment.write_text('data')
+
+        message = EmailMessageDto(
+            to='r@example.com',
+            subject='Test',
+            body='<p>See attachment</p>',
+            html=True,
+            attachments=[attachment],
+        )
+        msg = smtp_provider._build_mime_message(message)
+        # Outer is mixed; first child is the alternative block
+        alternative_block = msg.get_payload()[0]
+        content_types = [p.get_content_type() for p in alternative_block.get_payload()]
+
+        assert 'text/plain' in content_types
+        assert 'text/html' in content_types
+
+# =============================================================================
+# CONTENT-DISPOSITION FILENAME TESTS
+# =============================================================================
+
+class TestSMTPContentDisposition:
+    """Verify Content-Disposition filenames are properly encoded."""
+
+    def _get_attachment_part(self, smtp_provider, attachment):
+        """Build a MIME message with one attachment and return the attachment part."""
+        message = EmailMessageDto(
+            to='r@example.com',
+            subject='Test',
+            body='Body',
+            attachments=[attachment],
+        )
+        msg = smtp_provider._build_mime_message(message)
+        # parts[0] is the body block, parts[1] is the attachment
+        return msg.get_payload()[1]
+
+    def test_path_attachment_filename_is_set(self, smtp_provider, tmp_path):
+        """Path attachment: filename is present in Content-Disposition."""
+        f = tmp_path / 'report.pdf'
+        f.write_bytes(b'%PDF')
+
+        part = self._get_attachment_part(smtp_provider, f)
+
+        assert part.get_filename() == 'report.pdf'
+
+    def test_path_attachment_filename_with_spaces(self, smtp_provider, tmp_path):
+        """Path attachment: filename containing spaces is handled correctly."""
+        f = tmp_path / 'my report.pdf'
+        f.write_bytes(b'%PDF')
+
+        part = self._get_attachment_part(smtp_provider, f)
+
+        assert part.get_filename() == 'my report.pdf'
+
+    def test_tuple_attachment_filename_is_set(self, smtp_provider):
+        """Tuple attachment: filename is present in Content-Disposition."""
+        attachment = ('data.csv', b'a,b\n1,2', 'text/csv')
+
+        part = self._get_attachment_part(smtp_provider, attachment)
+
+        assert part.get_filename() == 'data.csv'
+
+    def test_tuple_attachment_filename_with_spaces(self, smtp_provider):
+        """Tuple attachment: filename containing spaces is handled correctly."""
+        attachment = ('my data.csv', b'a,b\n1,2', 'text/csv')
+
+        part = self._get_attachment_part(smtp_provider, attachment)
+
+        assert part.get_filename() == 'my data.csv'
+
+    def test_path_attachment_disposition_is_attachment(self, smtp_provider, tmp_path):
+        """Content-Disposition value is 'attachment' for Path-based files."""
+        f = tmp_path / 'file.txt'
+        f.write_text('content')
+
+        part = self._get_attachment_part(smtp_provider, f)
+        disposition = part.get_content_disposition()
+
+        assert disposition == 'attachment'
+
+    def test_tuple_attachment_disposition_is_attachment(self, smtp_provider):
+        """Content-Disposition value is 'attachment' for tuple-based files."""
+        attachment = ('file.txt', b'content', 'text/plain')
+
+        part = self._get_attachment_part(smtp_provider, attachment)
+        disposition = part.get_content_disposition()
+
+        assert disposition == 'attachment'
+
+    def test_tuple_attachment_content_type(self, smtp_provider):
+        """Tuple attachment: MIME type from the tuple is used for the part."""
+        attachment = ('sheet.csv', b'a,b', 'text/csv')
+
+        part = self._get_attachment_part(smtp_provider, attachment)
+
+        assert part.get_content_type() == 'text/csv'
+
+
+# =============================================================================
+# _html_to_plain UNIT TESTS
+# =============================================================================
+
+class TestHtmlToPlain:
+    """Unit tests for the _html_to_plain helper."""
+
+    def test_strips_simple_tags(self):
+        assert '<' not in _html_to_plain('<p>Hello</p>')
+        assert 'Hello' in _html_to_plain('<p>Hello</p>')
+
+    def test_strips_nested_tags(self):
+        result = _html_to_plain('<div><p>Hello <b>World</b></p></div>')
+        assert 'Hello' in result
+        assert 'World' in result
+        assert '<' not in result
+
+    def test_collapses_whitespace(self):
+        result = _html_to_plain('<p>Hello</p>   <p>World</p>')
+        assert '   ' not in result
+
+    def test_empty_string(self):
+        assert _html_to_plain('') == ''
+
+    def test_plain_text_unchanged(self):
+        result = _html_to_plain('No tags here')
+        assert result == 'No tags here'
 
 # =============================================================================
 # RUN TESTS
