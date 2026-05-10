@@ -347,6 +347,76 @@ class TestSMTPAsyncMimeStructure:
         sent_msg = mock_server.send_message.call_args[0][0]
         assert sent_msg.get_payload()[0].get_content_type() == 'multipart/alternative'
 
+# =============================================================================
+# PLAIN-TEXT FALLBACK ASYNC TESTS
+# =============================================================================
+
+class TestSMTPAsyncPlainTextFallback:
+    """Plain-text fallback must be present in messages sent via async path."""
+
+    async def test_async_send_html_has_plain_fallback(self, provider):
+        """async_send: HTML message includes a text/plain part."""
+        mock_server = make_mock_smtp_server()
+
+        message = EmailMessageDto(
+            to='r@example.com',
+            subject='Test',
+            body='<p>Hello <b>World</b></p>',
+            html=True,
+        )
+
+        with patch.object(provider, '_get_async_smtp_connection', return_value=mock_server):
+            await provider.async_send(message)
+
+        sent_msg = mock_server.send_message.call_args[0][0]
+        content_types = [p.get_content_type() for p in sent_msg.get_payload()]
+
+        assert 'text/plain' in content_types
+        assert 'text/html' in content_types
+
+    async def test_async_send_html_last_per_rfc(self, provider):
+        """async_send: HTML part is last inside alternative block (RFC 2046 §5.1.4)."""
+        mock_server = make_mock_smtp_server()
+
+        message = EmailMessageDto(
+            to='r@example.com',
+            subject='Test',
+            body='<p>Hello</p>',
+            html=True,
+        )
+
+        with patch.object(provider, '_get_async_smtp_connection', return_value=mock_server):
+            await provider.async_send(message)
+
+        sent_msg = mock_server.send_message.call_args[0][0]
+        parts = sent_msg.get_payload()
+
+        assert parts[-1].get_content_type() == 'text/html'
+        assert parts[0].get_content_type() == 'text/plain'
+
+    async def test_async_send_bulk_html_has_plain_fallback(self, provider):
+        """async_send_bulk: every HTML message in the batch has a plain-text fallback."""
+        mock_server = make_mock_smtp_server()
+
+        messages = [
+            EmailMessageDto(
+                to=f'u{i}@example.com',
+                subject=f'Test {i}',
+                body=f'<p>Message {i}</p>',
+                html=True,
+            )
+            for i in range(3)
+        ]
+        bulk = BulkEmailDTO(messages=messages)
+
+        with patch.object(provider, '_get_async_smtp_connection', return_value=mock_server):
+            await provider.async_send_bulk(bulk)
+
+        for send_call in mock_server.send_message.call_args_list:
+            sent_msg = send_call[0][0]
+            content_types = [p.get_content_type() for p in sent_msg.get_payload()]
+            assert 'text/plain' in content_types, \
+                f"Missing text/plain fallback in message: {sent_msg['Subject']}"
 
 if __name__ == '__main__':
     import pytest
