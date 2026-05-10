@@ -684,6 +684,86 @@ class TestSMTPPlainTextFallback:
         assert 'text/plain' in content_types
         assert 'text/html' in content_types
 
+# =============================================================================
+# CONTENT-DISPOSITION FILENAME TESTS
+# =============================================================================
+
+class TestSMTPContentDisposition:
+    """Verify Content-Disposition filenames are properly encoded."""
+
+    def _get_attachment_part(self, smtp_provider, attachment):
+        """Build a MIME message with one attachment and return the attachment part."""
+        message = EmailMessageDto(
+            to='r@example.com',
+            subject='Test',
+            body='Body',
+            attachments=[attachment],
+        )
+        msg = smtp_provider._build_mime_message(message)
+        # parts[0] is the body block, parts[1] is the attachment
+        return msg.get_payload()[1]
+
+    def test_path_attachment_filename_is_set(self, smtp_provider, tmp_path):
+        """Path attachment: filename is present in Content-Disposition."""
+        f = tmp_path / 'report.pdf'
+        f.write_bytes(b'%PDF')
+
+        part = self._get_attachment_part(smtp_provider, f)
+
+        assert part.get_filename() == 'report.pdf'
+
+    def test_path_attachment_filename_with_spaces(self, smtp_provider, tmp_path):
+        """Path attachment: filename containing spaces is handled correctly."""
+        f = tmp_path / 'my report.pdf'
+        f.write_bytes(b'%PDF')
+
+        part = self._get_attachment_part(smtp_provider, f)
+
+        assert part.get_filename() == 'my report.pdf'
+
+    def test_tuple_attachment_filename_is_set(self, smtp_provider):
+        """Tuple attachment: filename is present in Content-Disposition."""
+        attachment = ('data.csv', b'a,b\n1,2', 'text/csv')
+
+        part = self._get_attachment_part(smtp_provider, attachment)
+
+        assert part.get_filename() == 'data.csv'
+
+    def test_tuple_attachment_filename_with_spaces(self, smtp_provider):
+        """Tuple attachment: filename containing spaces is handled correctly."""
+        attachment = ('my data.csv', b'a,b\n1,2', 'text/csv')
+
+        part = self._get_attachment_part(smtp_provider, attachment)
+
+        assert part.get_filename() == 'my data.csv'
+
+    def test_path_attachment_disposition_is_attachment(self, smtp_provider, tmp_path):
+        """Content-Disposition value is 'attachment' for Path-based files."""
+        f = tmp_path / 'file.txt'
+        f.write_text('content')
+
+        part = self._get_attachment_part(smtp_provider, f)
+        disposition = part.get_content_disposition()
+
+        assert disposition == 'attachment'
+
+    def test_tuple_attachment_disposition_is_attachment(self, smtp_provider):
+        """Content-Disposition value is 'attachment' for tuple-based files."""
+        attachment = ('file.txt', b'content', 'text/plain')
+
+        part = self._get_attachment_part(smtp_provider, attachment)
+        disposition = part.get_content_disposition()
+
+        assert disposition == 'attachment'
+
+    def test_tuple_attachment_content_type(self, smtp_provider):
+        """Tuple attachment: MIME type from the tuple is used for the part."""
+        attachment = ('sheet.csv', b'a,b', 'text/csv')
+
+        part = self._get_attachment_part(smtp_provider, attachment)
+
+        assert part.get_content_type() == 'text/csv'
+
 
 # =============================================================================
 # RUN TESTS
