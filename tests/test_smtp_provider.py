@@ -573,6 +573,119 @@ class TestSMTPMimeStructure:
         assert set(filenames) == {'a.txt', 'b.txt', 'c.txt'}
 
 # =============================================================================
+# PLAIN-TEXT FALLBACK TESTS
+# =============================================================================
+
+class TestSMTPPlainTextFallback:
+    """Verify that HTML messages always carry a plain-text alternative."""
+
+    def _get_body_alternative_parts(self, msg):
+        """Return the list of parts inside the (possibly nested) alternative block."""
+        if msg.get_content_type() == 'multipart/alternative':
+            return msg.get_payload()
+        # Has attachments — alternative is nested as the first child of mixed
+        return msg.get_payload()[0].get_payload()
+
+    def test_html_message_has_plain_and_html_parts(self, smtp_provider):
+        """HTML message contains both text/plain fallback and text/html part."""
+        message = EmailMessageDto(
+            to='r@example.com',
+            subject='Test',
+            body='<p>Hello <b>World</b></p>',
+            html=True,
+        )
+        msg = smtp_provider._build_mime_message(message)
+        parts = self._get_body_alternative_parts(msg)
+
+        content_types = [p.get_content_type() for p in parts]
+        assert 'text/plain' in content_types
+        assert 'text/html' in content_types
+
+    def test_html_part_is_last(self, smtp_provider):
+        """HTML part comes after plain-text per RFC 2046 §5.1.4 (best last)."""
+        message = EmailMessageDto(
+            to='r@example.com',
+            subject='Test',
+            body='<p>Hello</p>',
+            html=True,
+        )
+        msg = smtp_provider._build_mime_message(message)
+        parts = self._get_body_alternative_parts(msg)
+
+        assert parts[-1].get_content_type() == 'text/html'
+        assert parts[0].get_content_type() == 'text/plain'
+
+    def test_html_body_preserved_in_html_part(self, smtp_provider):
+        """The text/html part carries the original HTML body unchanged."""
+        body = '<p>Hello <b>World</b></p>'
+        message = EmailMessageDto(
+            to='r@example.com',
+            subject='Test',
+            body=body,
+            html=True,
+        )
+        msg = smtp_provider._build_mime_message(message)
+        parts = self._get_body_alternative_parts(msg)
+
+        html_part = next(p for p in parts if p.get_content_type() == 'text/html')
+        assert body in html_part.get_payload(decode=True).decode()
+
+    def test_plain_fallback_strips_html_tags(self, smtp_provider):
+        """The text/plain fallback contains visible text without HTML tags."""
+        message = EmailMessageDto(
+            to='r@example.com',
+            subject='Test',
+            body='<p>Hello <b>World</b></p>',
+            html=True,
+        )
+        msg = smtp_provider._build_mime_message(message)
+        parts = self._get_body_alternative_parts(msg)
+
+        plain_part = next(p for p in parts if p.get_content_type() == 'text/plain')
+        plain_text = plain_part.get_payload(decode=True).decode()
+
+        assert 'Hello' in plain_text
+        assert 'World' in plain_text
+        assert '<' not in plain_text
+        assert '>' not in plain_text
+
+    def test_plain_only_message_has_single_part(self, smtp_provider):
+        """Plain-text message has only a text/plain part — no unnecessary wrapping."""
+        message = EmailMessageDto(
+            to='r@example.com',
+            subject='Test',
+            body='Just plain text',
+            html=False,
+        )
+        msg = smtp_provider._build_mime_message(message)
+        # The outer alternative container itself holds exactly one part
+        parts = msg.get_payload()
+
+        assert len(parts) == 1
+        assert parts[0].get_content_type() == 'text/plain'
+
+    def test_html_message_with_attachment_has_plain_fallback(self, smtp_provider, tmp_path):
+        """Plain-text fallback is present even when the message also has attachments."""
+        attachment = tmp_path / 'doc.txt'
+        attachment.write_text('data')
+
+        message = EmailMessageDto(
+            to='r@example.com',
+            subject='Test',
+            body='<p>See attachment</p>',
+            html=True,
+            attachments=[attachment],
+        )
+        msg = smtp_provider._build_mime_message(message)
+        # Outer is mixed; first child is the alternative block
+        alternative_block = msg.get_payload()[0]
+        content_types = [p.get_content_type() for p in alternative_block.get_payload()]
+
+        assert 'text/plain' in content_types
+        assert 'text/html' in content_types
+
+
+# =============================================================================
 # RUN TESTS
 # =============================================================================
 
