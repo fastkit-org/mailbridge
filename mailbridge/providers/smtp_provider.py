@@ -6,6 +6,7 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.base import MIMEBase
 from email import encoders
+from email.utils import make_msgid
 from pathlib import Path
 from mailbridge.providers.base_email_provider import BaseEmailProvider
 from mailbridge.dto.email_response_dto import EmailResponseDTO
@@ -117,29 +118,42 @@ class SMTPProvider(BaseEmailProvider):
 
     def _build_mime_message(self, message: EmailMessageDto) -> MIMEMultipart:
         """Build a MIME message from an EmailMessageDto."""
-        msg = MIMEMultipart('alternative')
-        msg['Subject'] = message.subject
-        msg['From'] = message.from_email or self.config.get('from_email', self.config['username'])
-        msg['To'] = ', '.join(message.to)
+        has_attachments = bool(message.attachments)
+
+        # Use 'mixed' when attachments are present so email clients
+        # render them correctly. 'alternative' alone cannot carry attachments.
+        outer = MIMEMultipart('mixed' if has_attachments else 'alternative')
+        outer['Message-ID'] = make_msgid()
+        outer['Subject'] = message.subject
+        outer['From'] = message.from_email or self.config.get('from_email', self.config['username'])
+        outer['To'] = ', '.join(message.to)
 
         if message.cc:
-            msg['Cc'] = ', '.join(message.cc)
+            outer['Cc'] = ', '.join(message.cc)
         if message.bcc:
-            msg['Bcc'] = ', '.join(message.bcc)
+            outer['Bcc'] = ', '.join(message.bcc)
         if message.reply_to:
-            msg['Reply-To'] = message.reply_to
+            outer['Reply-To'] = message.reply_to
         if message.headers:
             for key, value in message.headers.items():
-                msg[key] = value
+                outer[key] = value
 
-        part = MIMEText(message.body, 'html' if message.html else 'plain')
-        msg.attach(part)
+        # Always build a multipart/alternative body block so that email clients
+        # which do not render HTML can fall back to the plain-text version.
+        # When attachments are present this block is nested inside the outer
+        # multipart/mixed container; otherwise it *is* the outer container.
+        if has_attachments:
+            body_part = MIMEMultipart('alternative')
+            _attach_body_parts(body_part, message)
+            outer.attach(body_part)
+        else:
+            _attach_body_parts(outer, message)
 
-        if message.attachments:
+        if has_attachments:
             for attachment in message.attachments:
-                self._attach_file(msg, attachment)
+                self._attach_file(outer, attachment)
 
-        return msg
+        return outer
 
     def _get_smtp_connection(self):
         use_tls = self.config.get('use_tls', True)
@@ -179,7 +193,8 @@ class SMTPProvider(BaseEmailProvider):
             encoders.encode_base64(part)
             part.add_header(
                 'Content-Disposition',
-                f'attachment; filename={attachment.name}'
+                'attachment',
+                filename=attachment.name,
             )
             msg.attach(part)
         elif isinstance(attachment, tuple):
@@ -192,6 +207,41 @@ class SMTPProvider(BaseEmailProvider):
             encoders.encode_base64(part)
             part.add_header(
                 'Content-Disposition',
-                f'attachment; filename={filename}'
+                'attachment',
+                filename=filename,
             )
             msg.attach(part)
+
+
+def _attach_body_parts(container: MIMEMultipart, message: EmailMessageDto) -> None:
+    """Attach plain-text and (optionally) HTML body parts to *container*.
+
+    When the message is HTML, both a plain-text fallback and the HTML part are
+    attached so that clients which cannot render HTML still display something
+    readable.  For plain-text-only messages only the single text/plain part is
+    attached — wrapping it in an unnecessary alternative block would be wasteful.
+    """
+    if message.html:
+        # Plain-text fallback first; clients pick the last part they can render,
+        # so HTML must come second per RFC 2046 §5.1.4.
+        plain_fallback = MIMEText(
+            _html_to_plain(message.body), 'plain', 'utf-8'
+        )
+        container.attach(plain_fallback)
+        container.attach(MIMEText(message.body, 'html', 'utf-8'))
+    else:
+        container.attach(MIMEText(message.body, 'plain', 'utf-8'))
+
+
+def _html_to_plain(html: str) -> str:
+    """Return a very simple plain-text rendering of *html*.
+
+    This is intentionally minimal — it just strips tags and collapses
+    whitespace.  Projects that need a polished plain-text alternative should
+    swap this out for a proper library such as ``html2text``.
+    """
+    import re
+    text = re.sub(r'<[^>]+>', ' ', html)
+    text = re.sub(r'[ \t]+', ' ', text)
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    return text.strip()
