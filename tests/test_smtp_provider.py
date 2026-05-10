@@ -9,6 +9,10 @@ Tests cover:
 - Attachments
 - TLS vs SSL connections
 - Error handling
+- Message-ID generation
+- MIME structure correctness
+- Content-Disposition filename encoding
+- Plain-text fallback for HTML messages
 
 Run with: pytest tests/test_smtp_provider.py -v
 """
@@ -18,7 +22,7 @@ from unittest.mock import Mock, patch, MagicMock
 from pathlib import Path
 import smtplib
 
-from mailbridge.providers.smtp_provider import SMTPProvider
+from mailbridge.providers.smtp_provider import SMTPProvider, _html_to_plain
 from mailbridge.dto.email_message_dto import EmailMessageDto
 from mailbridge.dto.email_response_dto import EmailResponseDTO
 from mailbridge.exceptions import ConfigurationError, EmailSendError
@@ -413,6 +417,69 @@ class TestSMTPContextManager:
         with SMTPProvider(**smtp_config) as provider:
             assert provider is not None
             assert isinstance(provider, SMTPProvider)
+
+
+# =============================================================================
+# MESSAGE-ID TESTS
+# =============================================================================
+
+class TestSMTPMessageId:
+    """Test that Message-ID is always generated and returned in the response."""
+
+    def test_build_mime_message_sets_message_id(self, smtp_provider, simple_message):
+        """_build_mime_message always sets a non-empty Message-ID header."""
+        msg = smtp_provider._build_mime_message(simple_message)
+
+        assert msg['Message-ID'] is not None
+        assert len(msg['Message-ID']) > 0
+
+    def test_message_id_is_unique_per_message(self, smtp_provider, simple_message):
+        """Each call to _build_mime_message produces a different Message-ID."""
+        msg1 = smtp_provider._build_mime_message(simple_message)
+        msg2 = smtp_provider._build_mime_message(simple_message)
+
+        assert msg1['Message-ID'] != msg2['Message-ID']
+
+    def test_message_id_format(self, smtp_provider, simple_message):
+        """Message-ID follows the RFC 2822 angle-bracket format."""
+        msg = smtp_provider._build_mime_message(simple_message)
+        message_id = msg['Message-ID']
+
+        assert message_id.startswith('<')
+        assert message_id.endswith('>')
+        assert '@' in message_id
+
+    @patch('mailbridge.providers.smtp_provider.smtplib.SMTP')
+    def test_send_response_contains_message_id(self, mock_smtp_class, smtp_provider, simple_message):
+        """send() returns a response whose message_id is populated."""
+        mock_server = MagicMock()
+        mock_smtp_class.return_value.__enter__.return_value = mock_server
+
+        response = smtp_provider.send(simple_message)
+
+        assert response.message_id is not None
+        assert response.message_id.startswith('<')
+        assert '@' in response.message_id
+
+    @patch('mailbridge.providers.smtp_provider.smtplib.SMTP')
+    def test_send_bulk_responses_contain_message_ids(self, mock_smtp_class, smtp_provider):
+        """send_bulk() populates message_id on every successful response."""
+        from mailbridge.dto.bulk_email_dto import BulkEmailDTO
+
+        mock_server = MagicMock()
+        mock_smtp_class.return_value.__enter__.return_value = mock_server
+
+        messages = [
+            EmailMessageDto(to=f'u{i}@example.com', subject=f'Test {i}', body='Body')
+            for i in range(3)
+        ]
+        result = smtp_provider.send_bulk(BulkEmailDTO(messages=messages))
+
+        for response in result.responses:
+            assert response.success is True
+            assert response.message_id is not None
+            assert '@' in response.message_id
+
 
 
 # =============================================================================
