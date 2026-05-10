@@ -480,7 +480,97 @@ class TestSMTPMessageId:
             assert response.message_id is not None
             assert '@' in response.message_id
 
+# =============================================================================
+# MIME STRUCTURE TESTS
+# =============================================================================
 
+class TestSMTPMimeStructure:
+    """Verify the MIME tree is correct with and without attachments."""
+
+    def test_no_attachments_outer_is_alternative(self, smtp_provider):
+        """Without attachments the outer container is multipart/alternative."""
+        message = EmailMessageDto(
+            to='r@example.com',
+            subject='Test',
+            body='<p>Hello</p>',
+            html=True,
+        )
+        msg = smtp_provider._build_mime_message(message)
+
+        assert msg.get_content_type() == 'multipart/alternative'
+
+    def test_with_attachments_outer_is_mixed(self, smtp_provider, tmp_path):
+        """With attachments the outer container is multipart/mixed."""
+        attachment = tmp_path / 'f.txt'
+        attachment.write_text('data')
+
+        message = EmailMessageDto(
+            to='r@example.com',
+            subject='Test',
+            body='<p>Hello</p>',
+            html=True,
+            attachments=[attachment],
+        )
+        msg = smtp_provider._build_mime_message(message)
+
+        assert msg.get_content_type() == 'multipart/mixed'
+
+    def test_with_attachments_first_part_is_alternative(self, smtp_provider, tmp_path):
+        """With attachments the first child of mixed must be multipart/alternative."""
+        attachment = tmp_path / 'f.txt'
+        attachment.write_text('data')
+
+        message = EmailMessageDto(
+            to='r@example.com',
+            subject='Test',
+            body='<p>Hello</p>',
+            html=True,
+            attachments=[attachment],
+        )
+        msg = smtp_provider._build_mime_message(message)
+        parts = msg.get_payload()
+
+        assert parts[0].get_content_type() == 'multipart/alternative'
+
+    def test_with_attachments_second_part_is_attachment(self, smtp_provider, tmp_path):
+        """With attachments the second child of mixed is the attachment part."""
+        attachment = tmp_path / 'f.txt'
+        attachment.write_text('data')
+
+        message = EmailMessageDto(
+            to='r@example.com',
+            subject='Test',
+            body='<p>Hello</p>',
+            html=True,
+            attachments=[attachment],
+        )
+        msg = smtp_provider._build_mime_message(message)
+        parts = msg.get_payload()
+
+        assert parts[1].get_content_maintype() == 'application'
+        assert parts[1].get_filename() == 'f.txt'
+
+    def test_multiple_attachments_all_present(self, smtp_provider, tmp_path):
+        """All attachments appear as separate parts inside multipart/mixed."""
+        files = []
+        for name in ('a.txt', 'b.txt', 'c.txt'):
+            f = tmp_path / name
+            f.write_text('data')
+            files.append(f)
+
+        message = EmailMessageDto(
+            to='r@example.com',
+            subject='Test',
+            body='Body',
+            attachments=files,
+        )
+        msg = smtp_provider._build_mime_message(message)
+        parts = msg.get_payload()
+
+        # First part is the body block, rest are attachments
+        assert len(parts) == 4
+        filenames = [p.get_filename() for p in parts[1:]]
+        assert set(filenames) == {'a.txt', 'b.txt', 'c.txt'}
 
 # =============================================================================
 # RUN TESTS
